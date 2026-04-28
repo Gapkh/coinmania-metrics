@@ -1,0 +1,13 @@
+.env
+*.p8
+*.json
+!package.json
+!tsconfig.json
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+*.gz
+*.log
+*.output
