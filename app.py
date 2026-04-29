@@ -265,6 +265,7 @@ def _fetch_daily_sales(days=35):
         "yesterday": {"date": yesterday or "", "units": yesterday_units},
         "last7d": {"units": last7_units, "change_pct": change7_pct},
         "last30d": {"units": last30_units},
+        "prev30d": {"units": prev30_units},
         "change_30d_pct": change30_pct,
         "daily": daily_list,
         "by_country": by_country,
@@ -1084,8 +1085,19 @@ def data_route():
         }
     with _android_lock:
         android_snap = dict(_android_state)
-    # Include Android historical monthly downloads for bar chart
+    # Android historical monthly downloads for bar chart
     android_snap["monthly_hist"] = _hist.get_android_monthly_historical()
+    # Android daily last 30 days for line chart
+    _today = datetime.now(timezone.utc).date()
+    _cutoff30 = (_today - timedelta(days=30)).isoformat()
+    android_snap["daily_30d"] = sorted(
+        [{"date": k, "units": v} for k, v in _hist.AND_DOWNLOADS.items() if k >= _cutoff30],
+        key=lambda x: x["date"]
+    )
+    # iOS DAU latest from historical CSV
+    android_snap["ios_dau_latest"] = _hist._latest(_hist.IOS_DAU)
+    # iOS MAU latest from historical CSV
+    android_snap["ios_mau_latest"] = _hist._latest(_hist.IOS_MAU)
     return jsonify({**cache_snap, "analytics": analytics_snap, "android": android_snap})
 
 
@@ -1115,11 +1127,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
 <style>
-  :root {
-    --bg:#07070d; --card:#0f0f19; --card2:#131320; --border:#1c1c2e;
-    --text:#eeeef5; --muted:#64647a;
-    --ios:#06b6d4; --android:#22c55e;
-    --gold:#f59e0b; --red:#ef4444; --purple:#a78bfa;
+  :root{
+    --bg:#06060f;--card:#0d0d1a;--card2:#111122;--border:#1a1a2e;
+    --text:#eeeef5;--muted:#5a5a72;
+    --ios:#06b6d4;--android:#22c55e;
+    --gold:#f59e0b;--red:#ef4444;--purple:#a78bfa;
   }
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
@@ -1127,7 +1139,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   /* Rows: 36 hdr + 152 kpi + 1fr charts + 228 bottom + 3×8 gaps + 20 padding = 1080 */
   body{display:grid;grid-template-rows:36px 152px 1fr 228px;gap:8px;padding:10px 16px;height:100vh}
 
-  /* ── Header ───────────────────────────────────────────────────── */
+  /* ── Header ─────────────────────────────────────────────────── */
   .hdr{display:flex;align-items:center;gap:10px}
   .logo img{height:26px;width:auto;display:block}
   .pill{background:var(--card);border:1px solid var(--border);border-radius:20px;
@@ -1138,35 +1150,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     animation:pulse-dot 2s ease infinite}
   @keyframes pulse-dot{
     0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(34,197,94,.4)}
-    50%{opacity:.7;box-shadow:0 0 0 5px rgba(34,197,94,0)}
+    50%{opacity:.7;box-shadow:0 0 0 6px rgba(34,197,94,0)}
   }
 
-  /* ── KPI Row ──────────────────────────────────────────────────── */
+  /* ── KPI Row ────────────────────────────────────────────────── */
   .kpi-row{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
-  .kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;
-    padding:9px 12px 8px;display:flex;flex-direction:column;gap:2px;
-    position:relative;overflow:hidden;min-height:0}
+  .kpi{background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:10px 13px 10px;display:flex;flex-direction:column;
+    position:relative;overflow:hidden}
   .kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
-    background:var(--accent,var(--ios));border-radius:8px 8px 0 0}
-  .kpi-lbl{font-size:.58rem;font-weight:600;color:var(--muted);
-    text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .kpi-val{font-size:1.6rem;font-weight:700;line-height:1.05;letter-spacing:-1px}
-  .kpi-trend{font-size:.63rem;font-weight:600;min-height:.85rem}
-  .kpi-split{font-size:.6rem;color:var(--muted);margin-top:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    background:var(--accent,var(--ios));border-radius:10px 10px 0 0;
+    box-shadow:0 0 16px var(--accent,var(--ios))}
+  .kpi-lbl{font-size:.58rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.6px;flex-shrink:0;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .kpi-val{font-size:2rem;font-weight:800;line-height:1.05;letter-spacing:-1.5px;
+    margin:4px 0 2px;flex-shrink:0;color:var(--text)}
+  .kpi-trend{font-size:.66rem;font-weight:700;min-height:16px;flex-shrink:0;margin-bottom:2px}
+  /* Platform breakdown rows */
+  .kpi-plat{flex:1;min-height:0;display:flex;flex-direction:column;
+    justify-content:flex-end;gap:4px}
+  .kpi-prow{display:flex;justify-content:space-between;align-items:center}
+  .plt{font-size:.58rem;font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+  .plt.ios{color:var(--ios)} .plt.and{color:var(--android)}
+  .pnum{font-size:.7rem;font-weight:700;color:var(--text)}
+  /* iOS/Android ratio bar */
+  .kpi-ratio{height:3px;border-radius:3px;flex-shrink:0;margin-top:7px;
+    background:var(--android)}
+  .kpi-ratio-ios{height:100%;border-radius:3px;background:var(--ios);
+    transition:width .6s ease}
+  /* Special KPI: CF sparkline */
+  .kpi-split{font-size:.6rem;color:var(--muted);flex-shrink:0;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .kpi-split .ios{color:var(--ios)} .kpi-split .and{color:var(--android)}
-  .sep{color:#3a3a50}
-  .kpi-spark{flex:1;min-height:0;margin-top:3px;position:relative}
-  .kpi-stars{display:flex;flex-direction:column;justify-content:flex-end;
-    gap:2px;margin-top:auto}
-  .star-row{display:flex;align-items:center;gap:4px;font-size:.55rem;color:var(--muted)}
-  .sbar-bg{flex:1;height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+  .sep{color:#2e2e46}
+  .kpi-spark{flex:1;min-height:0;margin-top:4px;position:relative}
+  /* Special KPI: Rating stars */
+  .kpi-stars{flex:1;display:flex;flex-direction:column;justify-content:flex-end;
+    gap:3px;min-height:0}
+  .star-row{display:grid;grid-template-columns:22px 1fr 20px;align-items:center;gap:4px;font-size:.55rem;color:var(--muted)}
+  .sbar-bg{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
   .sbar-fill{height:100%;background:var(--gold);border-radius:2px}
 
-  /* ── Charts Row ───────────────────────────────────────────────── */
+  /* ── Charts Row ─────────────────────────────────────────────── */
   .charts-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .chart-card{background:var(--card);border:1px solid var(--border);border-radius:8px;
-    padding:10px 14px 10px;display:flex;flex-direction:column;min-height:0}
-  .chart-title{font-size:.6rem;font-weight:600;color:var(--muted);
+  .chart-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:10px 14px 8px;display:flex;flex-direction:column;min-height:0}
+  .chart-title{font-size:.6rem;font-weight:700;color:var(--muted);
     text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;
     display:flex;align-items:center;gap:10px}
   .ldot{display:inline-flex;align-items:center;gap:4px;font-size:.6rem;color:var(--muted)}
@@ -1174,23 +1204,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     background:var(--dc,var(--ios))}
   .cw{flex:1;min-height:0;position:relative}
 
-  /* ── Bottom Row ───────────────────────────────────────────────── */
+  /* ── Bottom Row ─────────────────────────────────────────────── */
   .bot-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-  .bot-card{background:var(--card);border:1px solid var(--border);border-radius:8px;
+  .bot-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
     padding:10px 14px 10px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
-  .card-ttl{font-size:.6rem;font-weight:600;color:var(--muted);
-    text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+  .card-ttl{font-size:.6rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;flex-shrink:0}
 
-  /* ── Version Table ────────────────────────────────────────────── */
+  /* ── Version Table ──────────────────────────────────────────── */
   .ver-table{flex:1;display:flex;flex-direction:column;gap:6px;overflow:hidden}
-  .ver-row{display:grid;grid-template-columns:78px 1fr 46px;align-items:center;gap:8px}
+  .ver-row{display:grid;grid-template-columns:80px 1fr 46px;align-items:center;gap:8px}
   .ver-lbl{font-size:.68rem;font-weight:500;color:var(--text);
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .vbar-bg{height:8px;border-radius:4px;background:var(--border);overflow:hidden}
-  .vbar-fill{height:100%;border-radius:4px;transition:width .5s ease}
+  .vbar-bg{height:6px;border-radius:3px;background:var(--border);overflow:hidden}
+  .vbar-fill{height:100%;border-radius:3px;transition:width .5s ease}
   .ver-cnt{font-size:.62rem;color:var(--muted);text-align:right}
 
-  /* ── Reviews Ticker ───────────────────────────────────────────── */
+  /* ── Reviews Ticker ─────────────────────────────────────────── */
   .rev-wrap{flex:1;overflow:hidden;position:relative;min-height:0}
   .rev-track{display:flex;flex-direction:column;gap:6px}
   .rev-track.animate{animation:revScroll var(--dur,20s) linear infinite}
@@ -1199,19 +1229,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     padding:8px 10px;display:flex;flex-direction:column;gap:2px;overflow:hidden;flex-shrink:0}
   .rev-hdr{display:flex;align-items:center;gap:6px}
   .rev-stars{color:var(--gold);font-size:.65rem;letter-spacing:1px;line-height:1}
-  .plat{font-size:.56rem;padding:1px 5px;border-radius:3px;font-weight:600}
-  .ios-p{background:rgba(6,182,212,.15);color:var(--ios)}
-  .and-p{background:rgba(34,197,94,.15);color:var(--android)}
-  .rev-date{font-size:.56rem;color:var(--muted);margin-left:auto}
+  .plat{font-size:.55rem;padding:1px 5px;border-radius:3px;font-weight:700;letter-spacing:.3px}
+  .ios-p{background:rgba(6,182,212,.12);color:var(--ios)}
+  .and-p{background:rgba(34,197,94,.12);color:var(--android)}
+  .rev-date{font-size:.54rem;color:var(--muted);margin-left:auto}
   .rev-author{font-size:.62rem;font-weight:600;color:var(--text)}
-  .rev-body{font-size:.64rem;color:var(--muted);line-height:1.35;overflow:hidden;
+  .rev-body{font-size:.63rem;color:var(--muted);line-height:1.35;overflow:hidden;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 
-  /* ── Shimmer ──────────────────────────────────────────────────── */
+  /* ── Shimmer ─────────────────────────────────────────────────── */
   @keyframes shim{0%{background-position:-400px 0}100%{background-position:400px 0}}
-  .shim{background:linear-gradient(90deg,var(--card) 25%,#1a1a2e 50%,var(--card) 75%);
+  .shim{background:linear-gradient(90deg,var(--card) 25%,#16162a 50%,var(--card) 75%);
     background-size:800px 100%;animation:shim 1.5s infinite;border-radius:4px;display:block}
-
   .up{color:var(--android)} .dn{color:var(--red)} .mu{color:var(--muted)}
 </style>
 </head>
@@ -1227,33 +1256,58 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <!-- Row 1: KPIs -->
 <div class="kpi-row">
+  <!-- 1. Since Launch -->
   <div class="kpi" style="--accent:var(--ios)">
     <div class="kpi-lbl">Downloads &middot; Since Launch</div>
     <div class="kpi-val" id="k-sl">&#8212;</div>
-    <div class="kpi-split" id="k-sl-s"></div>
+    <div class="kpi-trend"></div>
+    <div class="kpi-plat">
+      <div class="kpi-prow"><span class="plt ios">iOS</span><span class="pnum" id="k-sl-ios">&#8212;</span></div>
+      <div class="kpi-prow"><span class="plt and">Android</span><span class="pnum" id="k-sl-and">&#8212;</span></div>
+    </div>
+    <div class="kpi-ratio"><div class="kpi-ratio-ios" id="k-sl-bar" style="width:50%"></div></div>
   </div>
+  <!-- 2. Last 30 Days -->
   <div class="kpi" style="--accent:var(--ios)">
     <div class="kpi-lbl">Downloads &middot; Last 30 Days</div>
     <div class="kpi-val" id="k-dl">&#8212;</div>
     <div class="kpi-trend" id="k-dl-t"></div>
-    <div class="kpi-split" id="k-dl-s"></div>
+    <div class="kpi-plat">
+      <div class="kpi-prow"><span class="plt ios">iOS</span><span class="pnum" id="k-dl-ios">&#8212;</span></div>
+      <div class="kpi-prow"><span class="plt and">Android</span><span class="pnum" id="k-dl-and">&#8212;</span></div>
+    </div>
+    <div class="kpi-ratio"><div class="kpi-ratio-ios" id="k-dl-bar" style="width:50%"></div></div>
   </div>
+  <!-- 3. Yesterday -->
   <div class="kpi" style="--accent:var(--ios)">
     <div class="kpi-lbl">Downloads &middot; Yesterday</div>
     <div class="kpi-val" id="k-yd">&#8212;</div>
-    <div class="kpi-split" id="k-yd-s"></div>
+    <div class="kpi-trend" id="k-yd-t"></div>
+    <div class="kpi-plat">
+      <div class="kpi-prow"><span class="plt ios">iOS</span><span class="pnum" id="k-yd-ios">&#8212;</span></div>
+      <div class="kpi-prow"><span class="plt and">Android</span><span class="pnum" id="k-yd-and">&#8212;</span></div>
+    </div>
+    <div class="kpi-ratio"><div class="kpi-ratio-ios" id="k-yd-bar" style="width:50%"></div></div>
   </div>
+  <!-- 4. DAU -->
   <div class="kpi" style="--accent:var(--android)">
     <div class="kpi-lbl">Daily Active Users</div>
     <div class="kpi-val" id="k-dau">&#8212;</div>
-    <div class="kpi-split" id="k-dau-s"></div>
+    <div class="kpi-trend"></div>
+    <div class="kpi-plat">
+      <div class="kpi-prow"><span class="plt ios">iOS</span><span class="pnum" id="k-dau-ios">&#8212;</span></div>
+      <div class="kpi-prow"><span class="plt and">Android</span><span class="pnum" id="k-dau-and">&#8212;</span></div>
+    </div>
+    <div class="kpi-ratio"><div class="kpi-ratio-ios" id="k-dau-bar" style="width:50%"></div></div>
   </div>
+  <!-- 5. Crash-Free -->
   <div class="kpi" style="--accent:var(--gold)">
     <div class="kpi-lbl">Crash-Free Sessions</div>
     <div class="kpi-val" id="k-cf">&#8212;</div>
     <div class="kpi-split" id="k-cf-s"></div>
     <div class="kpi-spark"><canvas id="cfSpark"></canvas></div>
   </div>
+  <!-- 6. Rating -->
   <div class="kpi" style="--accent:var(--gold)">
     <div class="kpi-lbl">Average Rating</div>
     <div class="kpi-val" id="k-rt">&#8212;</div>
@@ -1299,8 +1353,8 @@ var IOS  = '#06b6d4';
 var AND  = '#22c55e';
 var GOLD = '#f59e0b';
 
-Chart.defaults.color = '#64647a';
-Chart.defaults.borderColor = '#1c1c2e';
+Chart.defaults.color = '#5a5a72';
+Chart.defaults.borderColor = '#1a1a2e';
 Chart.defaults.font.family = "-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif";
 Chart.defaults.font.size = 10;
 
@@ -1313,15 +1367,26 @@ function fmt(n){
 function fmtN(n){ return n==null?'&#8212;':Math.round(n).toLocaleString(); }
 function sh(h,w){ return '<span class="shim" style="height:'+h+';width:'+(w||'65%')+'"></span>'; }
 
+// Set platform breakdown rows + ratio bar
+function setPlat(iosId, andId, barId, iosVal, andVal){
+  var ie=document.getElementById(iosId);
+  var ae=document.getElementById(andId);
+  var be=document.getElementById(barId);
+  if(ie) ie.textContent = iosVal!=null ? Math.round(iosVal).toLocaleString() : '—';
+  if(ae) ae.textContent = andVal!=null ? Math.round(andVal).toLocaleString() : '—';
+  if(be && iosVal!=null && andVal!=null){
+    var tot=iosVal+andVal;
+    be.style.width = tot>0 ? (iosVal/tot*100).toFixed(1)+'%' : '50%';
+  }
+}
+
 var _cfChart=null, _lineChart=null, _barChart=null;
 
 // ── Card 1: Since Launch ──────────────────────────────────────────────────
 function renderSL(data,android){
-  // Sum completed months + current partial month from daily only
   var monthly=(data.monthly)||[];
   var iosTotal=0;
   monthly.forEach(function(m){ iosTotal+=(m.units||0); });
-  // Add current partial month days from daily (avoid double-counting completed months)
   var curMonth=new Date().toISOString().slice(0,7);
   var daily=(data.sales&&data.sales.daily)||[];
   daily.forEach(function(d){
@@ -1330,13 +1395,10 @@ function renderSL(data,android){
   var andTotal=android.total_installs||null;
   var total=(iosTotal||0)+(andTotal||0);
   document.getElementById('k-sl').innerHTML=fmtN(total||null);
-  var parts=[];
-  if(iosTotal) parts.push('<span class="ios">iOS '+fmtN(iosTotal)+'</span>');
-  if(andTotal) parts.push('<span class="and">Android '+fmtN(andTotal)+'</span>');
-  document.getElementById('k-sl-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
+  setPlat('k-sl-ios','k-sl-and','k-sl-bar',iosTotal||null,andTotal);
 }
 
-// ── Card 2: Downloads 30D ─────────────────────────────────────────────────
+// ── Card 2: Downloads 30D ────────────────────────────────────────────────
 function renderDL(data,android){
   var daily=(data.sales&&data.sales.daily)||[];
   var ios30=0;
@@ -1344,18 +1406,21 @@ function renderDL(data,android){
   var and30=android.installs_30d||0;
   var total=ios30+(and30||0);
   document.getElementById('k-dl').innerHTML=fmtN(total||ios30);
+  // Combined trend: (ios30+and30) vs (iosPrev30+andPrev30)
   var te=document.getElementById('k-dl-t');
-  // Use backend-calculated change which has full 65 days of data
-  var iosPct=data.sales&&data.sales.change_30d_pct!=null?data.sales.change_30d_pct:null;
-  if(iosPct!=null){
-    var pct=Math.round(iosPct);
-    te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs PP';
+  var iosPrev30=(data.sales&&data.sales.prev30d)?data.sales.prev30d.units:null;
+  var andPrev30=android.installs_prev_30d||null;
+  var combinedPrev=(iosPrev30||0)+(andPrev30||0);
+  if(combinedPrev>0){
+    var pct=Math.round((total-combinedPrev)/combinedPrev*100);
+    te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev 30d';
     te.className='kpi-trend '+(pct>=0?'up':'dn');
+  } else if(data.sales&&data.sales.change_30d_pct!=null){
+    var p=Math.round(data.sales.change_30d_pct);
+    te.innerHTML=(p>=0?'&#9650; +':'&#9660; ')+p+'% vs prev 30d';
+    te.className='kpi-trend '+(p>=0?'up':'dn');
   }
-  var parts=[];
-  if(ios30) parts.push('<span class="ios">iOS '+fmtN(ios30)+'</span>');
-  if(and30) parts.push('<span class="and">Android '+fmtN(and30)+'</span>');
-  document.getElementById('k-dl-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
+  setPlat('k-dl-ios','k-dl-and','k-dl-bar',ios30||null,and30||null);
 }
 
 // ── Card 3: Yesterday ────────────────────────────────────────────────────
@@ -1368,27 +1433,24 @@ function renderYD(data,android){
   var andYd=android.installs_yesterday||null;
   var total=iosYd+(andYd||0);
   document.getElementById('k-yd').innerHTML=fmtN(total||null);
-  var parts=[];
-  if(iosYd) parts.push('<span class="ios">iOS '+fmtN(iosYd)+'</span>');
-  if(andYd) parts.push('<span class="and">Android '+fmtN(andYd)+'</span>');
-  document.getElementById('k-yd-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
+  setPlat('k-yd-ios','k-yd-and','k-yd-bar',iosYd||null,andYd);
 }
 
-// ── Card 4: DAU ───────────────────────────────────────────────────────────
+// ── Card 4: DAU ──────────────────────────────────────────────────────────
 function renderDAU(analytics,android){
   var aD=(analytics.status==='ready')?(analytics.data||{}):{};
   var sum=aD.summary||{};
-  var iosDau=sum.sessions_30d?Math.round(sum.sessions_30d/30):null;
+  // iOS DAU: from analytics if available, else from historical CSV
+  var iosDau=null;
+  if(sum.sessions_30d) iosDau=Math.round(sum.sessions_30d/30);
+  if(!iosDau && android.ios_dau_latest) iosDau=android.ios_dau_latest;
   var andU=android.distinct_users||null;
   var total=(iosDau||0)+(andU||0);
-  document.getElementById('k-dau').innerHTML=total>0?fmtN(total):(andU?fmtN(andU):sh('1.85rem'));
-  var parts=[];
-  if(iosDau) parts.push('<span class="ios">iOS '+fmtN(iosDau)+'/day</span>');
-  if(andU) parts.push('<span class="and">Android '+fmtN(andU)+'</span>');
-  document.getElementById('k-dau-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
+  document.getElementById('k-dau').innerHTML=total>0?fmtN(total):(andU?fmtN(andU):sh('2rem'));
+  setPlat('k-dau-ios','k-dau-and','k-dau-bar',iosDau,andU);
 }
 
-// ── Card 5: Crash-Free ────────────────────────────────────────────────────
+// ── Card 5: Crash-Free ───────────────────────────────────────────────────
 function renderCF(analytics,android){
   var aD=(analytics.status==='ready')?(analytics.data||{}):{};
   var sum=aD.summary||{};
@@ -1399,12 +1461,11 @@ function renderCF(analytics,android){
   var show=null;
   if(iosCF!=null&&andCF!=null) show=(iosCF+andCF)/2;
   else show=andCF!=null?andCF:iosCF;
-  document.getElementById('k-cf').innerHTML=show!=null?show.toFixed(2)+'%':sh('1.85rem');
+  document.getElementById('k-cf').innerHTML=show!=null?show.toFixed(2)+'%':sh('2rem');
   var parts=[];
   if(iosCF!=null) parts.push('<span class="ios">iOS '+iosCF.toFixed(2)+'%</span>');
   if(andCF!=null) parts.push('<span class="and">Android '+andCF.toFixed(2)+'%</span>');
   document.getElementById('k-cf-s').innerHTML=parts.join('<span class="sep"> &middot; </span>');
-  // 7-day sparkline from iOS analytics
   var daily=aD.daily||{};
   var dates=Object.keys(daily).sort().slice(-7);
   var vals=[];
@@ -1422,25 +1483,23 @@ function buildCFSpark(vals){
   if(!vals||vals.length<2)return;
   _cfChart=new Chart(ctx,{
     type:'line',
-    data:{
-      labels:vals.map(function(_,i){return i;}),
+    data:{labels:vals.map(function(_,i){return i;}),
       datasets:[{data:vals,borderColor:GOLD,borderWidth:2,pointRadius:0,
-        tension:.4,fill:true,backgroundColor:'rgba(245,158,11,.07)'}]
-    },
+        tension:.4,fill:true,backgroundColor:'rgba(245,158,11,.08)'}]},
     options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{display:false},tooltip:{enabled:false},datalabels:{display:false}},
       scales:{x:{display:false},y:{display:false}},animation:false}
   });
 }
 
-// ── Card 6: Rating ────────────────────────────────────────────────────────
+// ── Card 6: Rating ───────────────────────────────────────────────────────
 function renderRating(reviews,android){
   var iosA=reviews&&reviews.average!=null?reviews.average:null;
   var andA=android.avg_rating!=null?android.avg_rating:null;
   var combined=null;
   if(iosA!=null&&andA!=null) combined=(iosA+andA)/2;
   else combined=andA!=null?andA:iosA;
-  document.getElementById('k-rt').innerHTML=combined!=null?combined.toFixed(1)+' &#9733;':sh('1.85rem');
+  document.getElementById('k-rt').innerHTML=combined!=null?combined.toFixed(1)+' &#9733;':sh('2rem');
   var parts=[];
   if(iosA!=null) parts.push('<span class="ios">iOS '+iosA.toFixed(1)+'</span>');
   if(andA!=null) parts.push('<span class="and">Android '+andA.toFixed(1)+'</span>');
@@ -1463,42 +1522,58 @@ function renderRating(reviews,android){
   }
 }
 
-
-// ── Chart 1: 30-Day Line ──────────────────────────────────────────────────
+// ── Chart 1: 30-Day Line ─────────────────────────────────────────────────
 function renderLineChart(data,android){
   var daily=(data.sales&&data.sales.daily)||[];
   var sorted=daily.slice().sort(function(a,b){return a.date<b.date?-1:1;}).slice(-30);
+  // Android daily from historical
+  var andDaily=android.daily_30d||[];
+  var andMap={};
+  andDaily.forEach(function(d){andMap[d.date]=d.units||0;});
   var labels=sorted.map(function(d){
-    var dt=new Date(d.date); return (dt.getMonth()+1)+'/'+(dt.getDate());
+    var dt=new Date(d.date+'T12:00:00');
+    return (dt.getMonth()+1)+'/'+(dt.getDate());
   });
   var iosD=sorted.map(function(d){return d.units||0;});
+  var andD=sorted.map(function(d){return andMap[d.date]||0;});
   var ctx=document.getElementById('lineC').getContext('2d');
   if(_lineChart){_lineChart.destroy();}
   _lineChart=new Chart(ctx,{
     type:'line',
-    data:{labels:labels,datasets:[{
-      label:'iOS',data:iosD,borderColor:IOS,
-      backgroundColor:'rgba(6,182,212,.07)',
-      borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true
-    }]},
+    data:{labels:labels,datasets:[
+      {label:'Android',data:andD,borderColor:AND,
+        backgroundColor:'rgba(34,197,94,.06)',
+        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true},
+      {label:'iOS',data:iosD,borderColor:IOS,
+        backgroundColor:'rgba(6,182,212,.08)',
+        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true}
+    ]},
     options:{
       responsive:true,maintainAspectRatio:false,
       interaction:{mode:'index',intersect:false},
       plugins:{
         legend:{display:false},
-        tooltip:{backgroundColor:'#1a1a2e',titleColor:'#eeeef5',
-          bodyColor:'#64647a',borderColor:'#1c1c2e',borderWidth:1,padding:8},
+        tooltip:{
+          backgroundColor:'#0d0d1a',titleColor:'#eeeef5',
+          bodyColor:'#9999b8',borderColor:'#1a1a2e',borderWidth:1,padding:10,
+          callbacks:{
+            afterBody:function(items){
+              var tot=items.reduce(function(s,i){return s+(i.parsed.y||0);},0);
+              return tot>0?['─────────','Total: '+tot.toLocaleString()]:'';
+            }
+          }
+        },
         datalabels:{display:false}
       },
       scales:{
-        x:{grid:{color:'#1c1c2e'},ticks:{maxTicksLimit:10,maxRotation:0}},
-        y:{grid:{color:'#1c1c2e'},beginAtZero:true,ticks:{precision:0}}
+        x:{grid:{color:'rgba(26,26,46,.8)'},ticks:{maxTicksLimit:10,maxRotation:0}},
+        y:{grid:{color:'rgba(26,26,46,.8)'},beginAtZero:true,ticks:{precision:0}}
       }
     }
   });
 }
 
-// ── Chart 2: Monthly Stacked Bar ──────────────────────────────────────────
+// ── Chart 2: Monthly Stacked Bar ─────────────────────────────────────────
 function renderBarChart(data,android){
   var iosMonthly=(data.monthly||[]).slice(-12);
   var andMonthly=(android.monthly_hist||[]);
@@ -1512,59 +1587,90 @@ function renderBarChart(data,android){
   });
   var iosV=iosMonthly.map(function(m){return m.units||0;});
   var andV=months.map(function(mo){return andMap[mo]||0;});
+  // Headroom: 18% above tallest bar so labels never clip
+  var maxBar=0;
+  months.forEach(function(mo,i){maxBar=Math.max(maxBar,(iosV[i]||0)+(andV[i]||0));});
   var ctx=document.getElementById('barC').getContext('2d');
   if(_barChart){_barChart.destroy();}
   _barChart=new Chart(ctx,{
     type:'bar',
     data:{labels:lbls,datasets:[
-    {
-      label:'Android',data:andV,
-      backgroundColor:'rgba(34,197,94,.55)',
-      borderColor:'#22c55e',borderWidth:1,
-      borderRadius:0,stack:'s'
-    },
-    {
-      label:'iOS',data:iosV,
-      backgroundColor:'rgba(6,182,212,.65)',
-      borderColor:IOS,borderWidth:1,
-      borderRadius:{topLeft:4,topRight:4},stack:'s'
-    }]},
-    options:{
-      responsive:true,maintainAspectRatio:false,
-      plugins:{
-        legend:{display:false},
-        tooltip:{backgroundColor:'#1a1a2e',titleColor:'#eeeef5',
-          bodyColor:'#64647a',borderColor:'#1c1c2e',borderWidth:1,padding:8},
+      {
+        label:'Android',data:andV,
+        backgroundColor:'rgba(34,197,94,.5)',
+        borderColor:'rgba(34,197,94,.8)',borderWidth:1,
+        borderRadius:0,stack:'s',
         datalabels:{
-          anchor:'end',align:'end',offset:4,
-          color:'#9999b0',font:{size:9,weight:'bold'},
-          formatter:function(v,ctx){
-            var tot=0;
-            ctx.chart.data.datasets.forEach(function(ds){tot+=(ds.data[ctx.dataIndex]||0);});
-            return tot>0?tot.toLocaleString():'';
-          },
-          display:function(ctx){
-            return ctx.datasetIndex===ctx.chart.data.datasets.length-1;
-          }
+          anchor:'center',align:'center',
+          color:'rgba(255,255,255,.85)',font:{size:8,weight:'600'},
+          formatter:function(v){return v>=200?v.toLocaleString():null;}
         }
       },
+      {
+        label:'iOS',data:iosV,
+        backgroundColor:'rgba(6,182,212,.6)',
+        borderColor:'rgba(6,182,212,.9)',borderWidth:1,
+        borderRadius:{topLeft:4,topRight:4},stack:'s',
+        datalabels:{
+          labels:{
+            inside:{
+              anchor:'center',align:'center',
+              color:'rgba(255,255,255,.85)',font:{size:8,weight:'600'},
+              formatter:function(v){return v>=200?v.toLocaleString():null;}
+            },
+            total:{
+              anchor:'end',align:'end',offset:4,
+              color:'#b0b0cc',font:{size:9,weight:'bold'},
+              formatter:function(v,ctx){
+                var i=ctx.dataIndex;
+                var tot=(iosV[i]||0)+(andV[i]||0);
+                return tot>0?tot.toLocaleString():null;
+              }
+            }
+          }
+        }
+      }
+    ]},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      layout:{padding:{top:22}},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#0d0d1a',titleColor:'#eeeef5',
+          bodyColor:'#9999b8',borderColor:'#1a1a2e',borderWidth:1,padding:10,
+          callbacks:{
+            label:function(item){
+              return '  '+item.dataset.label+': '+item.parsed.y.toLocaleString();
+            },
+            afterBody:function(items){
+              var i=items[0]?items[0].dataIndex:0;
+              var tot=(iosV[i]||0)+(andV[i]||0);
+              return tot>0?['','  Total: '+tot.toLocaleString()]:'';
+            }
+          }
+        },
+        datalabels:{display:false}
+      },
       scales:{
-        x:{grid:{display:false},stacked:true,ticks:{maxRotation:30}},
-        y:{grid:{color:'#1c1c2e'},stacked:true,beginAtZero:true,ticks:{precision:0}}
+        x:{grid:{display:false},stacked:true,ticks:{maxRotation:0}},
+        y:{grid:{color:'rgba(26,26,46,.8)'},stacked:true,beginAtZero:true,
+          suggestedMax:Math.max(500,Math.ceil(maxBar*1.22/100)*100),
+          ticks:{precision:0}}
       }
     },
     plugins:[ChartDataLabels]
   });
 }
 
-// ── Version Adoption ──────────────────────────────────────────────────────
+// ── Version Adoption ─────────────────────────────────────────────────────
 function renderVersions(android){
   var vd=android.version_data||[];
   var el=document.getElementById('verTable');
   if(!vd.length){
     var h='';
     for(var i=0;i<6;i++)
-      h+='<div class="ver-row">'+sh('.75rem','65px')+sh('8px','100%')+sh('.75rem','35px')+'</div>';
+      h+='<div class="ver-row">'+sh('.75rem','65px')+sh('6px','100%')+sh('.75rem','35px')+'</div>';
     el.innerHTML=h; return;
   }
   var max=Math.max.apply(null,vd.map(function(v){return v.installs;}));
@@ -1579,11 +1685,10 @@ function renderVersions(android){
   }).join('');
 }
 
-// ── Reviews Ticker ────────────────────────────────────────────────────────
+// ── Reviews Ticker ───────────────────────────────────────────────────────
 function renderReviews(reviews,android){
   var ios=((reviews&&reviews.recent)||[]).map(function(r){return Object.assign({},r,{platform:'ios'});});
   var and=(android.reviews||[]).map(function(r){return Object.assign({},r,{platform:'android'});});
-  // Interleave Android / iOS
   var out=[],ii=0,ai=0;
   while(ii<ios.length||ai<and.length){
     if(ai<and.length) out.push(and[ai++]);
