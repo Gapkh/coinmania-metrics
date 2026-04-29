@@ -82,12 +82,15 @@ _android_state = {
     "crash_count_30d": None,  # total crash reports last 30d
     "distinct_users": None,   # latest distinct users from vitals
     # GCS installs data
-    "active_installs": None,  # latest Active Device Installs
-    "daily_installs": None,   # avg Daily User Installs (last 30 days)
-    "daily_uninstalls": None, # avg Daily User Uninstalls (last 30 days)
-    "installs_30d": None,     # total Daily User Installs summed over last 30 days
-    "uninstalls_30d": None,   # total Daily User Uninstalls summed over last 30 days
-    "version_data": [],       # [{version, installs, platform}] sorted by installs desc
+    "active_installs": None,    # latest Active Device Installs
+    "total_installs": None,     # Total User Installs (all-time, from latest row)
+    "installs_yesterday": None, # Daily User Installs for yesterday
+    "daily_installs": None,     # avg Daily User Installs (last 30 days)
+    "daily_uninstalls": None,   # avg Daily User Uninstalls (last 30 days)
+    "installs_30d": None,       # total Daily User Installs summed over last 30 days
+    "installs_prev_30d": None,  # total Daily User Installs summed over days 31-60
+    "uninstalls_30d": None,     # total Daily User Uninstalls summed over last 30 days
+    "version_data": [],         # [{version, installs, platform}] sorted by installs desc
     "error": None,
     "fetched_at": None,
 }
@@ -814,10 +817,13 @@ def _fetch_android_data():
 
     # --- Fetch installs/uninstalls from GCS bulk reports ---
     active_installs = None
+    total_installs = None
+    installs_yesterday = None
     daily_installs = None
     version_data = []
     daily_uninstalls = None
     installs_30d = None
+    installs_prev_30d = None
     uninstalls_30d = None
     try:
         from google.oauth2 import service_account as _sa
@@ -875,26 +881,46 @@ def _fetch_android_data():
         if all_rows:
             # Sort by date descending
             all_rows.sort(key=lambda r: r.get("Date", ""), reverse=True)
-            # Last 30 days
-            cutoff = (today - timedelta(days=30)).isoformat()
-            recent = [r for r in all_rows if r.get("Date", "") >= cutoff]
-            if not recent:
-                recent = all_rows[:30]
+            # Date boundaries
+            yesterday_str = (today - timedelta(days=1)).isoformat()
+            cutoff_30 = (today - timedelta(days=30)).isoformat()
+            cutoff_60 = (today - timedelta(days=60)).isoformat()
 
-            # Active Device Installs from latest row
+            recent_30 = [r for r in all_rows if r.get("Date", "") >= cutoff_30]
+            recent_prev = [r for r in all_rows if cutoff_60 <= r.get("Date", "") < cutoff_30]
+            if not recent_30:
+                recent_30 = all_rows[:30]
+
+            # Active Device Installs + Total User Installs from latest row
             latest = all_rows[0]
             try:
                 active_installs = int(float(latest.get("Active Device Installs", 0) or 0))
             except (ValueError, TypeError):
                 pass
+            try:
+                total_installs = int(float(latest.get("Total User Installs", 0) or 0))
+            except (ValueError, TypeError):
+                pass
 
-            # Daily User Installs / Uninstalls averages
-            inst_vals = []
-            uninst_vals = []
-            for r in recent:
+            # Yesterday's installs
+            yest_rows = [r for r in all_rows if r.get("Date", "") == yesterday_str]
+            if yest_rows:
+                try:
+                    installs_yesterday = int(float(yest_rows[0].get("Daily User Installs", 0) or 0))
+                except (ValueError, TypeError):
+                    pass
+
+            # Last 30 days and previous 30 days
+            inst_vals, uninst_vals, prev_vals = [], [], []
+            for r in recent_30:
                 try:
                     inst_vals.append(int(float(r.get("Daily User Installs", 0) or 0)))
                     uninst_vals.append(int(float(r.get("Daily User Uninstalls", 0) or 0)))
+                except (ValueError, TypeError):
+                    pass
+            for r in recent_prev:
+                try:
+                    prev_vals.append(int(float(r.get("Daily User Installs", 0) or 0)))
                 except (ValueError, TypeError):
                     pass
             if inst_vals:
@@ -903,9 +929,11 @@ def _fetch_android_data():
             if uninst_vals:
                 uninstalls_30d = sum(uninst_vals)
                 daily_uninstalls = round(sum(uninst_vals) / len(uninst_vals), 1)
+            if prev_vals:
+                installs_prev_30d = sum(prev_vals)
 
-            log.info("Android installs: active=%s, daily_avg=%s, uninstall_avg=%s",
-                     active_installs, daily_installs, daily_uninstalls)
+            log.info("Android installs: active=%s, total=%s, yesterday=%s, 30d=%s, prev30d=%s",
+                     active_installs, total_installs, installs_yesterday, installs_30d, installs_prev_30d)
 
         # --- App version breakdown ---
         ver_rows = _read_installs_csv(
@@ -941,9 +969,12 @@ def _fetch_android_data():
         _android_state["crash_count_30d"] = crash_count_30d
         _android_state["distinct_users"] = distinct_users
         _android_state["active_installs"] = active_installs
+        _android_state["total_installs"] = total_installs
+        _android_state["installs_yesterday"] = installs_yesterday
         _android_state["daily_installs"] = daily_installs
         _android_state["daily_uninstalls"] = daily_uninstalls
         _android_state["installs_30d"] = installs_30d
+        _android_state["installs_prev_30d"] = installs_prev_30d
         _android_state["uninstalls_30d"] = uninstalls_30d
         _android_state["version_data"] = version_data
         _android_state["error"] = error
@@ -1080,7 +1111,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   /* ── KPI Row ──────────────────────────────────────────────────── */
-  .kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .kpi-row{display:grid;grid-template-columns:repeat(7,1fr);gap:10px}
   .kpi{background:var(--card);border:1px solid var(--border);border-radius:10px;
     padding:12px 14px 10px;display:flex;flex-direction:column;gap:2px;
     position:relative;overflow:hidden;min-height:0}
@@ -1164,10 +1195,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <!-- Row 1: KPIs -->
 <div class="kpi-row">
   <div class="kpi" style="--accent:var(--ios)">
-    <div class="kpi-lbl">Downloads &middot; 30 Days</div>
+    <div class="kpi-lbl">Downloads &middot; Since Launch</div>
+    <div class="kpi-val" id="k-sl">&#8212;</div>
+    <div class="kpi-split" id="k-sl-s"></div>
+  </div>
+  <div class="kpi" style="--accent:var(--ios)">
+    <div class="kpi-lbl">Downloads &middot; Last 30 Days</div>
     <div class="kpi-val" id="k-dl">&#8212;</div>
     <div class="kpi-trend" id="k-dl-t"></div>
     <div class="kpi-split" id="k-dl-s"></div>
+  </div>
+  <div class="kpi" style="--accent:var(--ios)">
+    <div class="kpi-lbl">Downloads &middot; Yesterday</div>
+    <div class="kpi-val" id="k-yd">&#8212;</div>
+    <div class="kpi-split" id="k-yd-s"></div>
   </div>
   <div class="kpi" style="--accent:var(--android)">
     <div class="kpi-lbl">Daily Active Users</div>
@@ -1247,32 +1288,64 @@ function sh(h,w){ return '<span class="shim" style="height:'+h+';width:'+(w||'65
 
 var _cfChart=null, _lineChart=null, _barChart=null;
 
-// ── Card 1: Downloads 30D ─────────────────────────────────────────────────
+// ── Card 1: Since Launch ──────────────────────────────────────────────────
+function renderSL(data,android){
+  var daily=(data.sales&&data.sales.daily)||[];
+  var iosTotal=0;
+  daily.forEach(function(d){ iosTotal+=(d.downloads||0); });
+  var andTotal=android.total_installs||null;
+  var total=(iosTotal||0)+(andTotal||0);
+  document.getElementById('k-sl').innerHTML=fmtN(total||null);
+  var parts=[];
+  if(iosTotal) parts.push('<span class="ios">iOS '+fmtN(iosTotal)+'</span>');
+  if(andTotal) parts.push('<span class="and">Android '+fmtN(andTotal)+'</span>');
+  document.getElementById('k-sl-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
+}
+
+// ── Card 2: Downloads 30D ─────────────────────────────────────────────────
 function renderDL(data,android){
   var daily=(data.sales&&data.sales.daily)||[];
   var now=Date.now(), d30=now-30*864e5, d60=now-60*864e5;
-  var ios30=0,iosPrev=0;
+  var ios30=0, iosPrev=0;
   daily.forEach(function(d){
     var t=new Date(d.date).getTime();
     if(t>=d30) ios30+=(d.downloads||0);
     else if(t>=d60) iosPrev+=(d.downloads||0);
   });
   var and30=android.installs_30d||0;
+  var andPrev=android.installs_prev_30d||0;
   var total=ios30+(and30||0);
+  var totalPrev=iosPrev+(andPrev||0);
   document.getElementById('k-dl').innerHTML=fmtN(total||ios30);
   var te=document.getElementById('k-dl-t');
-  if(iosPrev>0){
-    var pct=((ios30-iosPrev)/iosPrev*100).toFixed(1);
+  if(totalPrev>0){
+    var pct=((total-totalPrev)/totalPrev*100).toFixed(1);
     te.innerHTML=(parseFloat(pct)>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev 30d';
     te.className='kpi-trend '+(parseFloat(pct)>=0?'up':'dn');
   }
   var parts=[];
-  if(ios30) parts.push('<span class="ios">&#127822; '+fmtN(ios30)+'</span>');
-  if(and30) parts.push('<span class="and">&#129302; '+fmtN(and30)+'</span>');
-  document.getElementById('k-dl-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'&#127822; '+fmtN(ios30);
+  if(ios30) parts.push('<span class="ios">iOS '+fmtN(ios30)+'</span>');
+  if(and30) parts.push('<span class="and">Android '+fmtN(and30)+'</span>');
+  document.getElementById('k-dl-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
 }
 
-// ── Card 2: DAU ───────────────────────────────────────────────────────────
+// ── Card 3: Yesterday ────────────────────────────────────────────────────
+function renderYD(data,android){
+  var daily=(data.sales&&data.sales.daily)||[];
+  var yest=new Date(); yest.setDate(yest.getDate()-1);
+  var yStr=yest.toISOString().slice(0,10);
+  var iosYd=0;
+  daily.forEach(function(d){ if(d.date===yStr) iosYd+=(d.downloads||0); });
+  var andYd=android.installs_yesterday||null;
+  var total=iosYd+(andYd||0);
+  document.getElementById('k-yd').innerHTML=fmtN(total||null);
+  var parts=[];
+  if(iosYd) parts.push('<span class="ios">iOS '+fmtN(iosYd)+'</span>');
+  if(andYd) parts.push('<span class="and">Android '+fmtN(andYd)+'</span>');
+  document.getElementById('k-yd-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
+}
+
+// ── Card 4: DAU ───────────────────────────────────────────────────────────
 function renderDAU(analytics,android){
   var aD=(analytics.status==='ready')?(analytics.data||{}):{};
   var sum=aD.summary||{};
@@ -1281,12 +1354,12 @@ function renderDAU(analytics,android){
   var total=(iosDau||0)+(andU||0);
   document.getElementById('k-dau').innerHTML=total>0?fmtN(total):(andU?fmtN(andU):sh('1.85rem'));
   var parts=[];
-  if(iosDau) parts.push('<span class="ios">&#127822; '+fmtN(iosDau)+'/day</span>');
-  if(andU) parts.push('<span class="and">&#129302; '+fmtN(andU)+'</span>');
-  document.getElementById('k-dau-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&#8230;</span>';
+  if(iosDau) parts.push('<span class="ios">iOS '+fmtN(iosDau)+'/day</span>');
+  if(andU) parts.push('<span class="and">Android '+fmtN(andU)+'</span>');
+  document.getElementById('k-dau-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&hellip;</span>';
 }
 
-// ── Card 3: Crash-Free ────────────────────────────────────────────────────
+// ── Card 5: Crash-Free ────────────────────────────────────────────────────
 function renderCF(analytics,android){
   var aD=(analytics.status==='ready')?(analytics.data||{}):{};
   var sum=aD.summary||{};
@@ -1299,8 +1372,8 @@ function renderCF(analytics,android){
   else show=andCF!=null?andCF:iosCF;
   document.getElementById('k-cf').innerHTML=show!=null?show.toFixed(2)+'%':sh('1.85rem');
   var parts=[];
-  if(iosCF!=null) parts.push('<span class="ios">&#127822; '+iosCF.toFixed(2)+'%</span>');
-  if(andCF!=null) parts.push('<span class="and">&#129302; '+andCF.toFixed(2)+'%</span>');
+  if(iosCF!=null) parts.push('<span class="ios">iOS '+iosCF.toFixed(2)+'%</span>');
+  if(andCF!=null) parts.push('<span class="and">Android '+andCF.toFixed(2)+'%</span>');
   document.getElementById('k-cf-s').innerHTML=parts.join('<span class="sep"> &middot; </span>');
   // 7-day sparkline from iOS analytics
   var daily=aD.daily||{};
@@ -1331,7 +1404,7 @@ function buildCFSpark(vals){
   });
 }
 
-// ── Card 4: Rating ────────────────────────────────────────────────────────
+// ── Card 6: Rating ────────────────────────────────────────────────────────
 function renderRating(reviews,android){
   var iosA=reviews&&reviews.average!=null?reviews.average:null;
   var andA=android.avg_rating!=null?android.avg_rating:null;
@@ -1340,8 +1413,8 @@ function renderRating(reviews,android){
   else combined=andA!=null?andA:iosA;
   document.getElementById('k-rt').innerHTML=combined!=null?combined.toFixed(1)+' &#9733;':sh('1.85rem');
   var parts=[];
-  if(iosA!=null) parts.push('<span class="ios">&#127822; '+iosA.toFixed(1)+'</span>');
-  if(andA!=null) parts.push('<span class="and">&#129302; '+andA.toFixed(1)+'</span>');
+  if(iosA!=null) parts.push('<span class="ios">iOS '+iosA.toFixed(1)+'</span>');
+  if(andA!=null) parts.push('<span class="and">Android '+andA.toFixed(1)+'</span>');
   document.getElementById('k-rt-s').innerHTML=parts.join('<span class="sep"> &middot; </span>');
   var dist=(reviews&&reviews.distribution)||{};
   var aD=android.dist||{};
@@ -1361,7 +1434,7 @@ function renderRating(reviews,android){
   }
 }
 
-// ── Card 5: Active Installs ───────────────────────────────────────────────
+// ── Card 7: Active Installs ───────────────────────────────────────────────
 function renderAI(android){
   var ai=android.active_installs;
   var i30=android.installs_30d, u30=android.uninstalls_30d;
@@ -1376,7 +1449,7 @@ function renderAI(android){
   if(i30) parts.push('<span class="and">+'+fmtN(i30)+' installs</span>');
   if(u30) parts.push('<span style="color:var(--red)">&#8722;'+fmtN(u30)+'</span>');
   document.getElementById('k-ai-s').innerHTML=
-    parts.join(' ')||'<span class="mu">'+(ai?'&#129302; Android':'Pending GCS access')+'</span>';
+    parts.join(' ')||'<span class="mu">'+(ai?'Android':'Pending GCS access')+'</span>';
 }
 
 // ── Chart 1: 30-Day Line ──────────────────────────────────────────────────
@@ -1506,7 +1579,7 @@ function renderReviews(reviews,android){
     var stars='';
     for(var i=1;i<=5;i++) stars+=i<=(r.rating||0)?'&#9733;':'&#9734;';
     var platCls=r.platform==='ios'?'ios-p':'and-p';
-    var platTxt=r.platform==='ios'?'&#127822; iOS':'&#129302; Android';
+    var platTxt=r.platform==='ios'?'iOS':'Android';
     var body=(r.body||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     var author=(r.author||'Anonymous').replace(/</g,'&lt;');
     return '<div class="rev-card">'+
@@ -1534,7 +1607,9 @@ function render(cache){
     var u=new Date(cache.updatedAt);
     document.getElementById('updatedAt').textContent='Updated '+u.toLocaleTimeString();
   }
+  renderSL(data,android);
   renderDL(data,android);
+  renderYD(data,android);
   renderDAU(analytics,android);
   renderCF(analytics,android);
   renderRating(data.reviews||{},android);
