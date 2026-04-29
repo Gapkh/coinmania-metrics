@@ -87,6 +87,7 @@ _android_state = {
     "daily_uninstalls": None, # avg Daily User Uninstalls (last 30 days)
     "installs_30d": None,     # total Daily User Installs summed over last 30 days
     "uninstalls_30d": None,   # total Daily User Uninstalls summed over last 30 days
+    "version_data": [],       # [{version, installs, platform}] sorted by installs desc
     "error": None,
     "fetched_at": None,
 }
@@ -814,6 +815,7 @@ def _fetch_android_data():
     # --- Fetch installs/uninstalls from GCS bulk reports ---
     active_installs = None
     daily_installs = None
+    version_data = []
     daily_uninstalls = None
     installs_30d = None
     uninstalls_30d = None
@@ -905,6 +907,27 @@ def _fetch_android_data():
             log.info("Android installs: active=%s, daily_avg=%s, uninstall_avg=%s",
                      active_installs, daily_installs, daily_uninstalls)
 
+        # --- App version breakdown ---
+        ver_rows = _read_installs_csv(
+            f"stats/installs/installs_{ANDROID_PACKAGE}_{months_to_try[0]}_app_version.csv"
+        )
+        if ver_rows:
+            ver_agg = {}
+            for r in ver_rows:
+                ver = r.get("App Version Code") or r.get("App Version Name") or "unknown"
+                try:
+                    cnt = int(float(r.get("Daily Device Installs", 0) or 0))
+                except (ValueError, TypeError):
+                    cnt = 0
+                ver_agg[ver] = ver_agg.get(ver, 0) + cnt
+            version_data = sorted(
+                [{"version": v, "installs": c, "platform": "android"}
+                 for v, c in ver_agg.items() if c > 0],
+                key=lambda x: x["installs"], reverse=True
+            )[:8]
+        else:
+            version_data = []
+
     except Exception as e:
         log.warning("Android GCS installs error: %s", e)
 
@@ -922,6 +945,7 @@ def _fetch_android_data():
         _android_state["daily_uninstalls"] = daily_uninstalls
         _android_state["installs_30d"] = installs_30d
         _android_state["uninstalls_30d"] = uninstalls_30d
+        _android_state["version_data"] = version_data
         _android_state["error"] = error
         _android_state["fetched_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -1027,993 +1051,508 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Coinmania &middot; Analytics</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
 <style>
   :root {
-    --bg:#09090e; --card:#10101a; --card2:#14141f; --border:#1e1e2d;
-    --text:#f0f0f5; --muted:#6b6b7e;
-    --cyan:#06b6d4; --purple:#a78bfa; --gold:#f59e0b; --green:#22c55e;
-    --red:#ef4444; --orange:#f97316;
+    --bg:#07070d; --card:#0f0f19; --card2:#131320; --border:#1c1c2e;
+    --text:#eeeef5; --muted:#64647a;
+    --ios:#06b6d4; --android:#22c55e;
+    --gold:#f59e0b; --red:#ef4444; --purple:#a78bfa;
   }
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    height: 100%;
-    overflow: hidden;
-  }
-  body {
-    display: grid;
-    grid-template-rows: 46px 110px 1fr 1fr;
-    gap: 12px;
-    padding: 16px 22px;
-    height: 100vh;
-    overflow: hidden;
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif}
+  body{display:grid;grid-template-rows:36px auto auto auto;gap:10px;padding:12px 18px;height:100vh}
+
+  /* ── Header ───────────────────────────────────────────────────── */
+  .hdr{display:flex;align-items:center;gap:10px}
+  .logo{font-size:1.1rem;font-weight:800;letter-spacing:-.5px}
+  .logo em{color:var(--gold);font-style:normal}
+  .pill{background:var(--card);border:1px solid var(--border);border-radius:20px;
+    padding:2px 10px;font-size:.68rem;color:var(--muted)}
+  .live-badge{display:flex;align-items:center;gap:5px;margin-left:auto;
+    font-size:.65rem;color:var(--muted)}
+  .live-dot{width:7px;height:7px;border-radius:50%;background:var(--android);
+    animation:pulse-dot 2s ease infinite}
+  @keyframes pulse-dot{
+    0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(34,197,94,.4)}
+    50%{opacity:.7;box-shadow:0 0 0 5px rgba(34,197,94,0)}
   }
 
-  /* ── Row 1 Header ─────────────────────────────────────────────────────── */
-  .header {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-  }
-  .logo {
-    font-size: 1.15rem;
-    font-weight: 700;
-    letter-spacing: -0.5px;
-    color: var(--text);
-  }
-  .logo span { color: var(--gold); }
-  .date-pill {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 3px 12px;
-    font-size: 0.72rem;
-    color: var(--muted);
-  }
-  .spacer { flex: 1; }
-  .updated { font-size: 0.68rem; color: var(--muted); }
-  .live-dot {
-    width: 8px; height: 8px;
-    border-radius: 50%;
-    background: var(--green);
-    box-shadow: 0 0 6px var(--green);
-    animation: pulse 2s infinite;
-    flex-shrink: 0;
-  }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  /* ── KPI Row ──────────────────────────────────────────────────── */
+  .kpi-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .kpi{background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:12px 14px 10px;display:flex;flex-direction:column;gap:2px;
+    position:relative;overflow:hidden;min-height:0}
+  .kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
+    background:var(--accent,var(--ios));border-radius:10px 10px 0 0}
+  .kpi-lbl{font-size:.62rem;font-weight:600;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.5px}
+  .kpi-val{font-size:1.85rem;font-weight:700;line-height:1;letter-spacing:-1px}
+  .kpi-trend{font-size:.68rem;font-weight:600;min-height:.9rem}
+  .kpi-split{font-size:.65rem;color:var(--muted);margin-top:auto}
+  .kpi-split .ios{color:var(--ios)} .kpi-split .and{color:var(--android)}
+  .sep{color:#3a3a50}
+  .kpi-spark{flex:1;min-height:0;margin-top:4px;position:relative}
+  .kpi-stars{display:flex;flex-direction:column;justify-content:flex-end;
+    gap:2px;margin-top:auto}
+  .star-row{display:flex;align-items:center;gap:5px;font-size:.57rem;color:var(--muted)}
+  .sbar-bg{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+  .sbar-fill{height:100%;background:var(--gold);border-radius:2px}
 
-  /* ── Row 2 KPI Cards ──────────────────────────────────────────────────── */
-  .kpi-row {
-    display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 10px;
-  }
-  .kpi {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 10px 12px 8px;
-    position: relative;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-  }
-  .kpi::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 2px;
-    background: var(--accent, var(--cyan));
-  }
-  .kpi-icon {
-    position: absolute;
-    top: 8px; right: 10px;
-    width: 28px; height: 28px;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--accent, var(--cyan)) 15%, transparent);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 0.85rem;
-  }
-  .kpi-label {
-    font-size: 0.62rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .kpi-value {
-    font-size: 1.45rem;
-    font-weight: 700;
-    font-variant-numeric: tabular-nums;
-    line-height: 1.1;
-    color: var(--text);
-  }
-  .kpi-sub { font-size: 0.65rem; color: var(--muted); }
-  .kpi-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    font-size: 0.62rem;
-    padding: 2px 7px;
-    border-radius: 10px;
-    font-weight: 600;
-    margin-top: auto;
-    width: fit-content;
-  }
-  .badge-up   { background: color-mix(in srgb, var(--green)  18%, transparent); color: var(--green);  }
-  .badge-down { background: color-mix(in srgb, var(--red)    18%, transparent); color: var(--red);    }
-  .badge-neutral { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
-  .badge-purple  { background: color-mix(in srgb, var(--purple) 15%, transparent); color: var(--purple); }
-  .star-bars { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
-  .star-bar-row {
-    display: flex; align-items: center; gap: 3px;
-    font-size: 0.55rem; color: var(--muted);
-  }
-  .star-bar-track {
-    flex: 1; height: 3px;
-    background: var(--border); border-radius: 2px; overflow: hidden;
-  }
-  .star-bar-fill { height: 100%; border-radius: 2px; }
-  .sparkline-wrap {
-    position: absolute;
-    bottom: 0; left: 0; right: 0;
-    opacity: 0.35; height: 28px;
-  }
+  /* ── Charts Row ───────────────────────────────────────────────── */
+  .charts-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .chart-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:14px 16px 12px;display:flex;flex-direction:column;min-height:0}
+  .chart-title{font-size:.65rem;font-weight:600;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;
+    display:flex;align-items:center;gap:10px}
+  .ldot{display:inline-flex;align-items:center;gap:4px;font-size:.62rem;color:var(--muted)}
+  .ldot::before{content:'';display:block;width:10px;height:3px;border-radius:2px;
+    background:var(--dc,var(--ios))}
+  .cw{flex:1;min-height:0;position:relative}
 
-  /* ── Shimmer ──────────────────────────────────────────────────────────── */
-  .shimmer {
-    background: linear-gradient(90deg, var(--border) 25%, var(--card2) 50%, var(--border) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-    border-radius: 6px; height: 2rem; width: 80%;
-  }
-  .shimmer-row {
-    background: linear-gradient(90deg, var(--border) 25%, var(--card2) 50%, var(--border) 75%);
-    background-size: 200% 100%;
-    animation: shimmer 1.5s infinite;
-    border-radius: 6px; height: 1rem; width: 100%; margin: 4px 0;
-  }
-  @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+  /* ── Bottom Row ───────────────────────────────────────────────── */
+  .bot-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .bot-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:14px 16px 12px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+  .card-ttl{font-size:.65rem;font-weight:600;color:var(--muted);
+    text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
 
-  /* ── Row 3 Charts ─────────────────────────────────────────────────────── */
-  .charts-row {
-    display: grid;
-    grid-template-columns: 62% 38%;
-    gap: 10px;
-    min-height: 0;
-  }
+  /* ── Version Table ────────────────────────────────────────────── */
+  .ver-table{flex:1;display:flex;flex-direction:column;gap:6px;overflow:hidden}
+  .ver-row{display:grid;grid-template-columns:78px 1fr 46px;align-items:center;gap:8px}
+  .ver-lbl{font-size:.68rem;font-weight:500;color:var(--text);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .vbar-bg{height:8px;border-radius:4px;background:var(--border);overflow:hidden}
+  .vbar-fill{height:100%;border-radius:4px;transition:width .5s ease}
+  .ver-cnt{font-size:.62rem;color:var(--muted);text-align:right}
 
-  /* ── Row 4 Bottom ─────────────────────────────────────────────────────── */
-  .bottom-row {
-    display: grid;
-    grid-template-columns: 22% 22% 56%;
-    gap: 10px;
-    min-height: 0;
-  }
+  /* ── Reviews Grid ─────────────────────────────────────────────── */
+  .rev-grid{flex:1;display:grid;grid-template-columns:1fr 1fr;
+    grid-template-rows:1fr 1fr;gap:8px;min-height:0}
+  .rev-card{background:var(--card2);border:1px solid var(--border);border-radius:8px;
+    padding:9px 11px;display:flex;flex-direction:column;gap:3px;overflow:hidden}
+  .rev-hdr{display:flex;align-items:center;gap:6px}
+  .rev-stars{color:var(--gold);font-size:.68rem;letter-spacing:1px;line-height:1}
+  .plat{font-size:.58rem;padding:1px 5px;border-radius:3px;font-weight:600}
+  .ios-p{background:rgba(6,182,212,.15);color:var(--ios)}
+  .and-p{background:rgba(34,197,94,.15);color:var(--android)}
+  .rev-date{font-size:.58rem;color:var(--muted);margin-left:auto}
+  .rev-author{font-size:.63rem;font-weight:600;color:var(--text)}
+  .rev-body{font-size:.66rem;color:var(--muted);line-height:1.4;overflow:hidden;
+    display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
 
-  /* ── Generic card ─────────────────────────────────────────────────────── */
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    overflow: hidden;
-    min-height: 0;
-  }
-  .card-title {
-    font-size: 0.72rem;
-    font-weight: 600;
-    color: var(--text);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    flex-shrink: 0;
-  }
-  .card-sub { font-size: 0.62rem; color: var(--muted); }
-  .chart-wrap { flex: 1; position: relative; min-height: 0; }
-  .title-row { display: flex; align-items: center; flex-shrink: 0; }
+  /* ── Shimmer ──────────────────────────────────────────────────── */
+  @keyframes shim{0%{background-position:-400px 0}100%{background-position:400px 0}}
+  .shim{background:linear-gradient(90deg,var(--card) 25%,#1a1a2e 50%,var(--card) 75%);
+    background-size:800px 100%;animation:shim 1.5s infinite;border-radius:4px;display:block}
 
-  /* ── Countries ────────────────────────────────────────────────────────── */
-  .country-list {
-    display: flex; flex-direction: column;
-    gap: 5px; overflow: hidden; flex: 1;
-  }
-  .country-row {
-    display: flex; align-items: center;
-    gap: 6px; font-size: 0.68rem;
-  }
-  .country-flag { font-size: 0.95rem; width: 20px; text-align: center; }
-  .country-name { color: var(--muted); width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .country-bar-track { flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
-  .country-bar-fill { height: 100%; border-radius: 2px; }
-  .country-num { width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
-
-  /* ── Health panel ─────────────────────────────────────────────────────── */
-  .donut-wrap {
-    position: relative;
-    width: 90px; height: 90px;
-    flex-shrink: 0; margin: 0 auto;
-  }
-  .donut-center {
-    position: absolute; inset: 0;
-    display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    font-size: 1.1rem; font-weight: 700;
-    pointer-events: none;
-  }
-  .donut-center small { font-size: 0.55rem; color: var(--muted); font-weight: 400; }
-  .health-metrics { display: flex; flex-direction: column; gap: 5px; flex: 1; }
-  .health-metric-row {
-    display: flex; justify-content: space-between; align-items: center;
-    font-size: 0.65rem;
-  }
-  .health-metric-label { color: var(--muted); }
-  .health-metric-value { font-weight: 600; font-variant-numeric: tabular-nums; }
-  .dist-bars { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
-
-  /* ── Reviews grid ─────────────────────────────────────────────────────── */
-  .reviews-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    grid-template-rows: repeat(2, 1fr);
-    gap: 8px;
-    flex: 1; min-height: 0;
-  }
-  .review-card {
-    background: var(--card2);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 8px 10px;
-    display: flex; flex-direction: column;
-    gap: 3px; overflow: hidden; min-height: 0;
-  }
-  .review-top {
-    display: flex; justify-content: space-between;
-    align-items: flex-start; gap: 4px;
-  }
-  .review-stars { font-size: 0.65rem; color: var(--gold); flex-shrink: 0; }
-  .review-meta { font-size: 0.58rem; color: var(--muted); text-align: right; }
-  .platform-ios { font-size: 0.52rem; background: color-mix(in srgb,var(--cyan) 15%,transparent); color:var(--cyan); border-radius:4px; padding:1px 4px; margin-left:3px; }
-  .platform-android { font-size: 0.52rem; background: color-mix(in srgb,var(--green) 15%,transparent); color:var(--green); border-radius:4px; padding:1px 4px; margin-left:3px; }
-  .review-title {
-    font-size: 0.68rem; font-weight: 600;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .review-body {
-    font-size: 0.62rem; color: var(--muted); line-height: 1.4;
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .count-badge {
-    display: inline-flex; align-items: center;
-    background: var(--card2); border: 1px solid var(--border);
-    border-radius: 10px; padding: 1px 8px;
-    font-size: 0.62rem; color: var(--muted); margin-left: 6px;
-  }
+  .up{color:var(--android)} .dn{color:var(--red)} .mu{color:var(--muted)}
 </style>
 </head>
 <body>
 
-<!-- Row 1: Header -->
-<header class="header">
-  <div class="logo">&#127860; Coin<span>mania</span></div>
-  <div class="date-pill" id="datePill">Loading&hellip;</div>
-  <div class="spacer"></div>
-  <div class="updated" id="updatedAt">&mdash;</div>
-  <div class="live-dot"></div>
-</header>
+<!-- Header -->
+<div class="hdr">
+  <span class="logo">Coin<em>mania</em></span>
+  <span class="pill" id="datePill">&#8212;</span>
+  <span class="pill" id="updatedAt">&#8212;</span>
+  <span class="live-badge"><span class="live-dot"></span>LIVE</span>
+</div>
 
-<!-- Row 2: KPI Cards -->
+<!-- Row 1: KPIs -->
 <div class="kpi-row">
-  <!-- 1: Since Launch -->
-  <div class="kpi" style="--accent:var(--purple)">
-    <div class="kpi-icon">&#128640;</div>
-    <div class="kpi-label">Since Launch</div>
-    <div class="kpi-value" id="k-launch">&mdash;</div>
-    <div class="kpi-sub">Total downloads</div>
-    <div class="kpi-badge badge-purple" id="k-launch-badge">&mdash; months</div>
+  <div class="kpi" style="--accent:var(--ios)">
+    <div class="kpi-lbl">Downloads &middot; 30 Days</div>
+    <div class="kpi-val" id="k-dl">&#8212;</div>
+    <div class="kpi-trend" id="k-dl-t"></div>
+    <div class="kpi-split" id="k-dl-s"></div>
   </div>
-  <!-- 2: Downloads 30d -->
-  <div class="kpi" style="--accent:var(--cyan)">
-    <div class="kpi-icon">&#128229;</div>
-    <div class="kpi-label">Downloads &middot; 30 Days</div>
-    <div class="kpi-value" id="k-30d">&mdash;</div>
-    <div class="kpi-sub" id="k-30d-sub"></div>
-    <div class="sparkline-wrap" id="k-30d-spark"></div>
-    <div class="kpi-badge badge-neutral" id="k-30d-badge">vs prev 30d</div>
+  <div class="kpi" style="--accent:var(--android)">
+    <div class="kpi-lbl">Daily Active Users</div>
+    <div class="kpi-val" id="k-dau">&#8212;</div>
+    <div class="kpi-split" id="k-dau-s"></div>
   </div>
-  <!-- 3: Downloads Yesterday -->
-  <div class="kpi" style="--accent:#0ea5e9">
-    <div class="kpi-icon">&#8595;</div>
-    <div class="kpi-label">Downloads &middot; Yesterday</div>
-    <div class="kpi-value" id="k-yday">&mdash;</div>
-    <div class="kpi-sub" id="k-yday-sub"></div>
-    <div class="sparkline-wrap" id="k-yday-spark"></div>
-    <div class="kpi-badge badge-neutral" id="k-7d-badge">7d trend</div>
-  </div>
-  <!-- 4: Deletions 30d -->
-  <div class="kpi" style="--accent:var(--red)">
-    <div class="kpi-icon">&#128465;</div>
-    <div class="kpi-label">Deletions &middot; 30 Days</div>
-    <div id="k-del-wrap"><div class="shimmer"></div></div>
-    <div class="kpi-badge badge-neutral" id="k-del-badge" style="margin-top:auto"></div>
-  </div>
-  <!-- 5: Rating -->
   <div class="kpi" style="--accent:var(--gold)">
-    <div class="kpi-icon">&#11088;</div>
-    <div class="kpi-label">Rating</div>
-    <div class="kpi-value" id="k-rating">&mdash;</div>
-    <div class="star-bars" id="k-star-bars"></div>
-    <div class="kpi-sub" id="k-rating-sub"></div>
+    <div class="kpi-lbl">Crash-Free Sessions</div>
+    <div class="kpi-val" id="k-cf">&#8212;</div>
+    <div class="kpi-split" id="k-cf-s"></div>
+    <div class="kpi-spark"><canvas id="cfSpark"></canvas></div>
   </div>
-  <!-- 6: Active Devices 28d -->
-  <div class="kpi" style="--accent:var(--green)">
-    <div class="kpi-icon">&#128241;</div>
-    <div class="kpi-label">Active Devices &middot; 28d</div>
-    <div id="k-active-wrap"><div class="shimmer"></div></div>
-    <div class="kpi-sub" id="k-active-sub"></div>
+  <div class="kpi" style="--accent:var(--gold)">
+    <div class="kpi-lbl">Average Rating</div>
+    <div class="kpi-val" id="k-rt">&#8212;</div>
+    <div class="kpi-split" id="k-rt-s"></div>
+    <div class="kpi-stars" id="k-stars"></div>
+  </div>
+  <div class="kpi" style="--accent:var(--android)">
+    <div class="kpi-lbl">Active Installs &middot; Android</div>
+    <div class="kpi-val" id="k-ai">&#8212;</div>
+    <div class="kpi-trend" id="k-ai-t"></div>
+    <div class="kpi-split" id="k-ai-s"></div>
   </div>
 </div>
 
-<!-- Row 3: Charts -->
+<!-- Row 2: Charts -->
 <div class="charts-row">
-  <div class="card">
-    <div class="title-row">
-      <div class="card-title" id="line-title">30-Day Installs</div>
+  <div class="chart-card">
+    <div class="chart-title">
+      30-Day Installs
+      <span class="ldot" style="--dc:var(--ios)">iOS</span>
+      <span class="ldot" style="--dc:var(--android)">Android</span>
     </div>
-    <div class="chart-wrap">
-      <canvas id="lineChart"></canvas>
-    </div>
+    <div class="cw"><canvas id="lineC"></canvas></div>
   </div>
-  <div class="card">
-    <div class="title-row">
-      <div class="card-title">Monthly Totals</div>
-      <span class="card-sub" style="margin-left:8px">Since launch</span>
+  <div class="chart-card">
+    <div class="chart-title">
+      Monthly Totals &middot; Last 12 Months
+      <span class="ldot" style="--dc:var(--ios)">iOS</span>
+      <span class="ldot" style="--dc:var(--android)">Android</span>
     </div>
-    <div class="chart-wrap">
-      <canvas id="barChart"></canvas>
-    </div>
+    <div class="cw"><canvas id="barC"></canvas></div>
   </div>
 </div>
 
-<!-- Row 4: Bottom -->
-<div class="bottom-row">
-  <!-- Countries -->
-  <div class="card">
-    <div class="card-title">Top Markets</div>
-    <div class="country-list" id="countryList"></div>
+<!-- Row 3: Versions + Reviews -->
+<div class="bot-row">
+  <div class="bot-card">
+    <div class="card-ttl">App Version Adoption &middot; Android</div>
+    <div class="ver-table" id="verTable"></div>
   </div>
-  <!-- App Health -->
-  <div class="card">
-    <div class="card-title">App Health</div>
-    <div class="donut-wrap">
-      <canvas id="donutChart"></canvas>
-      <div class="donut-center">
-        <span id="donut-avg">&mdash;</span>
-        <small>avg</small>
-      </div>
-    </div>
-    <div class="dist-bars" id="distBars"></div>
-    <div class="health-metrics" id="healthMetrics"></div>
+  <div class="bot-card">
+    <div class="card-ttl">Recent Reviews</div>
+    <div class="rev-grid" id="revGrid"></div>
   </div>
-  <!-- Reviews -->
-  <div class="card">
-    <div class="title-row">
-      <div class="card-title">Recent Reviews</div>
-      <span class="count-badge" id="reviewCount">0</span>
-    </div>
-    <div class="reviews-grid" id="reviewsGrid"></div>
-  </div>
-
 </div>
 
 <script>
-// ── Globals ──────────────────────────────────────────────────────────────────
-var lineChart = null, barChart = null, donutChart = null;
+var IOS  = '#06b6d4';
+var AND  = '#22c55e';
+var GOLD = '#f59e0b';
 
-Chart.defaults.color = '#6b6b7e';
-Chart.defaults.borderColor = '#1e1e2d';
-Chart.defaults.font.family = "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif";
+Chart.defaults.color = '#64647a';
+Chart.defaults.borderColor = '#1c1c2e';
+Chart.defaults.font.family = "-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif";
 Chart.defaults.font.size = 10;
 
-// ── Lookup tables ─────────────────────────────────────────────────────────────
-var FLAGS = {
-  GE:'&#127468;&#127466;', US:'&#127482;&#127480;', GB:'&#127468;&#127463;',
-  DE:'&#127465;&#127466;', FR:'&#127467;&#127479;', RU:'&#127479;&#127482;',
-  TR:'&#127481;&#127479;', UA:'&#127482;&#127462;', KZ:'&#127472;&#127487;',
-  AZ:'&#127462;&#127487;', AM:'&#127462;&#127474;', SA:'&#127480;&#127462;',
-  AE:'&#127462;&#127466;', IN:'&#127470;&#127475;', JP:'&#127471;&#127477;',
-  CN:'&#127464;&#127475;', KR:'&#127472;&#127479;', CA:'&#127464;&#127462;',
-  AU:'&#127462;&#127482;', BR:'&#127463;&#127479;', MX:'&#127474;&#127485;',
-  ES:'&#127466;&#127480;', IT:'&#127470;&#127481;', PL:'&#127477;&#127473;',
-  NL:'&#127475;&#127473;', SE:'&#127480;&#127466;', IL:'&#127470;&#127473;',
-  EG:'&#127466;&#127468;', PK:'&#127477;&#127472;', ID:'&#127470;&#127465;',
-  TH:'&#127481;&#127469;', VN:'&#127483;&#127475;', NG:'&#127475;&#127468;',
-  ZA:'&#127487;&#127462;', AR:'&#127462;&#127479;', BY:'&#127463;&#127486;',
-  MD:'&#127474;&#127465;', UZ:'&#127482;&#127487;'
-};
-var COUNTRY_NAMES = {
-  GE:'Georgia', US:'United States', GB:'United Kingdom', DE:'Germany',
-  FR:'France', RU:'Russia', TR:'Turkey', UA:'Ukraine', KZ:'Kazakhstan',
-  AZ:'Azerbaijan', AM:'Armenia', SA:'Saudi Arabia', AE:'UAE', IN:'India',
-  JP:'Japan', CN:'China', KR:'S. Korea', CA:'Canada', AU:'Australia',
-  BR:'Brazil', MX:'Mexico', ES:'Spain', IT:'Italy', PL:'Poland',
-  NL:'Netherlands', SE:'Sweden', IL:'Israel', EG:'Egypt', PK:'Pakistan',
-  ID:'Indonesia', TH:'Thailand', VN:'Vietnam', NG:'Nigeria', ZA:'S. Africa',
-  AR:'Argentina', BY:'Belarus', MD:'Moldova', UZ:'Uzbekistan'
-};
-var BAR_COLORS = ['#06b6d4','#a78bfa','#f59e0b','#22c55e','#f97316','#ec4899',
-                  '#8b5cf6','#14b8a6','#ef4444','#3b82f6','#84cc16','#d946ef'];
+function fmt(n){
+  if(n==null)return'&#8212;';
+  if(n>=1e6)return(n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return(n/1e3).toFixed(1)+'K';
+  return String(Math.round(n));
+}
+function fmtN(n){ return n==null?'&#8212;':Math.round(n).toLocaleString(); }
+function sh(h,w){ return '<span class="shim" style="height:'+h+';width:'+(w||'65%')+'"></span>'; }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function fmt(n) {
-  if (n == null) return '—';
-  return Number(n).toLocaleString();
-}
-function pct(n) {
-  if (n == null) return '—';
-  return (n >= 0 ? '+' : '') + Number(n).toFixed(1) + '%';
-}
-function moLabel(s) {
-  if (!s) return '';
-  var parts = s.split('-');
-  var mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return (mo[parseInt(parts[1], 10) - 1] || parts[1]) + " '" + String(parts[0]).slice(2);
-}
-function dayLabel(s) {
-  if (!s) return '';
-  var d = new Date(s + 'T00:00:00Z');
-  var mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return mo[d.getUTCMonth()] + ' ' + d.getUTCDate();
-}
-function stars(n) {
-  n = Math.round(n || 0);
-  return '★'.repeat(Math.min(5, Math.max(0, n))) + '☆'.repeat(Math.max(0, 5 - n));
-}
-function shimmer() {
-  return '<div class="shimmer-row"></div>';
-}
-function sparkSVG(vals, color) {
-  if (!vals || !vals.length) return '';
-  var w = 120, h = 28;
-  var max = Math.max.apply(null, vals.concat([1]));
-  var min = Math.min.apply(null, vals.concat([0]));
-  var range = max - min || 1;
-  var pts = vals.map(function(v, i) {
-    var x = (i / Math.max(vals.length - 1, 1)) * w;
-    var y = h - ((v - min) / range) * (h - 4) - 2;
-    return x + ',' + y;
+var _cfChart=null, _lineChart=null, _barChart=null;
+
+// ── Card 1: Downloads 30D ─────────────────────────────────────────────────
+function renderDL(data,android){
+  var daily=(data.sales&&data.sales.daily)||[];
+  var now=Date.now(), d30=now-30*864e5, d60=now-60*864e5;
+  var ios30=0,iosPrev=0;
+  daily.forEach(function(d){
+    var t=new Date(d.date).getTime();
+    if(t>=d30) ios30+=(d.downloads||0);
+    else if(t>=d60) iosPrev+=(d.downloads||0);
   });
-  var id = 'sg' + Math.random().toString(36).slice(2);
-  var areaPath = 'M ' + pts[0] + ' L ' + pts.join(' L ') +
-    ' L ' + w + ',' + h + ' L 0,' + h + ' Z';
-  return '<svg viewBox="0 0 ' + w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg"' +
-    ' preserveAspectRatio="none" width="100%" height="100%">' +
-    '<defs><linearGradient id="' + id + '" x1="0" y1="0" x2="0" y2="1">' +
-    '<stop offset="0%" stop-color="' + color + '" stop-opacity="0.5"/>' +
-    '<stop offset="100%" stop-color="' + color + '" stop-opacity="0"/>' +
-    '</linearGradient></defs>' +
-    '<path d="' + areaPath + '" fill="url(#' + id + ')"/>' +
-    '<polyline points="' + pts.join(' ') + '" fill="none" stroke="' + color +
-    '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>' +
-    '</svg>';
+  var and30=android.installs_30d||0;
+  var total=ios30+(and30||0);
+  document.getElementById('k-dl').innerHTML=fmtN(total||ios30);
+  var te=document.getElementById('k-dl-t');
+  if(iosPrev>0){
+    var pct=((ios30-iosPrev)/iosPrev*100).toFixed(1);
+    te.innerHTML=(parseFloat(pct)>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev 30d';
+    te.className='kpi-trend '+(parseFloat(pct)>=0?'up':'dn');
+  }
+  var parts=[];
+  if(ios30) parts.push('<span class="ios">&#127822; '+fmtN(ios30)+'</span>');
+  if(and30) parts.push('<span class="and">&#129302; '+fmtN(and30)+'</span>');
+  document.getElementById('k-dl-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'&#127822; '+fmtN(ios30);
 }
 
-// ── Charts ────────────────────────────────────────────────────────────────────
-function buildLineChart(labels, dlData, delData) {
-  var ctx = document.getElementById('lineChart').getContext('2d');
-  var cyan = '#06b6d4';
-  var red = '#ef4444';
-  var gradFill = ctx.createLinearGradient(0, 0, 0, 300);
-  gradFill.addColorStop(0, 'rgba(6,182,212,0.25)');
-  gradFill.addColorStop(1, 'rgba(6,182,212,0)');
-  var datasets = [{
-    label: 'Downloads',
-    data: dlData,
-    borderColor: cyan,
-    backgroundColor: gradFill,
-    fill: true,
-    tension: 0.4,
-    pointRadius: 0,
-    pointHoverRadius: 4,
-    borderWidth: 2
-  }];
-  if (delData && delData.length && delData.some(function(v){ return v > 0; })) {
-    datasets.push({
-      label: 'Deletions',
-      data: delData,
-      borderColor: red,
-      backgroundColor: 'transparent',
-      fill: false,
-      tension: 0.4,
-      borderDash: [4, 3],
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      borderWidth: 1.5
-    });
+// ── Card 2: DAU ───────────────────────────────────────────────────────────
+function renderDAU(analytics,android){
+  var aD=(analytics.status==='ready')?(analytics.data||{}):{};
+  var sum=aD.summary||{};
+  var iosDau=sum.sessions_30d?Math.round(sum.sessions_30d/30):null;
+  var andU=android.distinct_users||null;
+  var total=(iosDau||0)+(andU||0);
+  document.getElementById('k-dau').innerHTML=total>0?fmtN(total):(andU?fmtN(andU):sh('1.85rem'));
+  var parts=[];
+  if(iosDau) parts.push('<span class="ios">&#127822; '+fmtN(iosDau)+'/day</span>');
+  if(andU) parts.push('<span class="and">&#129302; '+fmtN(andU)+'</span>');
+  document.getElementById('k-dau-s').innerHTML=parts.join('<span class="sep"> &middot; </span>')||'<span class="mu">Loading&#8230;</span>';
+}
+
+// ── Card 3: Crash-Free ────────────────────────────────────────────────────
+function renderCF(analytics,android){
+  var aD=(analytics.status==='ready')?(analytics.data||{}):{};
+  var sum=aD.summary||{};
+  var iosCF=null;
+  if(sum.sessions_30d&&sum.crashes_30d!=null)
+    iosCF=(1-sum.crashes_30d/sum.sessions_30d)*100;
+  var andCF=android.crash_rate!=null?(1-android.crash_rate)*100:null;
+  var show=null;
+  if(iosCF!=null&&andCF!=null) show=(iosCF+andCF)/2;
+  else show=andCF!=null?andCF:iosCF;
+  document.getElementById('k-cf').innerHTML=show!=null?show.toFixed(2)+'%':sh('1.85rem');
+  var parts=[];
+  if(iosCF!=null) parts.push('<span class="ios">&#127822; '+iosCF.toFixed(2)+'%</span>');
+  if(andCF!=null) parts.push('<span class="and">&#129302; '+andCF.toFixed(2)+'%</span>');
+  document.getElementById('k-cf-s').innerHTML=parts.join('<span class="sep"> &middot; </span>');
+  // 7-day sparkline from iOS analytics
+  var daily=aD.daily||{};
+  var dates=Object.keys(daily).sort().slice(-7);
+  var vals=[];
+  dates.forEach(function(d){
+    var day=daily[d];
+    if(day&&day.sessions) vals.push((1-(day.crashes||0)/day.sessions)*100);
+  });
+  buildCFSpark(vals);
+}
+function buildCFSpark(vals){
+  var el=document.getElementById('cfSpark');
+  if(!el)return;
+  var ctx=el.getContext('2d');
+  if(_cfChart){_cfChart.destroy();_cfChart=null;}
+  if(!vals||vals.length<2)return;
+  _cfChart=new Chart(ctx,{
+    type:'line',
+    data:{
+      labels:vals.map(function(_,i){return i;}),
+      datasets:[{data:vals,borderColor:GOLD,borderWidth:2,pointRadius:0,
+        tension:.4,fill:true,backgroundColor:'rgba(245,158,11,.07)'}]
+    },
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{enabled:false},datalabels:{display:false}},
+      scales:{x:{display:false},y:{display:false}},animation:false}
+  });
+}
+
+// ── Card 4: Rating ────────────────────────────────────────────────────────
+function renderRating(reviews,android){
+  var iosA=reviews&&reviews.average!=null?reviews.average:null;
+  var andA=android.avg_rating!=null?android.avg_rating:null;
+  var combined=null;
+  if(iosA!=null&&andA!=null) combined=(iosA+andA)/2;
+  else combined=andA!=null?andA:iosA;
+  document.getElementById('k-rt').innerHTML=combined!=null?combined.toFixed(1)+' &#9733;':sh('1.85rem');
+  var parts=[];
+  if(iosA!=null) parts.push('<span class="ios">&#127822; '+iosA.toFixed(1)+'</span>');
+  if(andA!=null) parts.push('<span class="and">&#129302; '+andA.toFixed(1)+'</span>');
+  document.getElementById('k-rt-s').innerHTML=parts.join('<span class="sep"> &middot; </span>');
+  var dist=(reviews&&reviews.distribution)||{};
+  var aD=android.dist||{};
+  var total=0;
+  for(var s=1;s<=5;s++) total+=(parseInt(dist[s])||0)+(parseInt(aD[s])||0);
+  var wrap=document.getElementById('k-stars');
+  if(total>0){
+    var h='';
+    for(var star=5;star>=1;star--){
+      var cnt=(parseInt(dist[star])||0)+(parseInt(aD[star])||0);
+      var p=cnt/total*100;
+      h+='<div class="star-row"><span>'+star+'&#9733;</span>'+
+        '<div class="sbar-bg"><div class="sbar-fill" style="width:'+p.toFixed(1)+'%"></div></div>'+
+        '<span>'+cnt+'</span></div>';
+    }
+    wrap.innerHTML=h;
   }
-  var cfg = {
-    type: 'line',
-    data: { labels: labels, datasets: datasets },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: {
-          display: datasets.length > 1,
-          labels: { boxWidth: 12, padding: 8, color: '#6b6b7e' }
-        },
-        tooltip: {
-          backgroundColor: '#14141f',
-          borderColor: '#1e1e2d',
-          borderWidth: 1,
-          titleColor: '#f0f0f5',
-          bodyColor: '#a0a0b0'
-        }
+}
+
+// ── Card 5: Active Installs ───────────────────────────────────────────────
+function renderAI(android){
+  var ai=android.active_installs;
+  var i30=android.installs_30d, u30=android.uninstalls_30d;
+  document.getElementById('k-ai').innerHTML=ai!=null?fmtN(ai):sh('1.85rem');
+  var te=document.getElementById('k-ai-t');
+  if(i30!=null&&u30!=null){
+    var net=i30-u30;
+    te.innerHTML=(net>=0?'&#9650; +':'&#9660; ')+fmtN(net)+' net 30d';
+    te.className='kpi-trend '+(net>=0?'up':'dn');
+  }
+  var parts=[];
+  if(i30) parts.push('<span class="and">+'+fmtN(i30)+' installs</span>');
+  if(u30) parts.push('<span style="color:var(--red)">&#8722;'+fmtN(u30)+'</span>');
+  document.getElementById('k-ai-s').innerHTML=
+    parts.join(' ')||'<span class="mu">'+(ai?'&#129302; Android':'Pending GCS access')+'</span>';
+}
+
+// ── Chart 1: 30-Day Line ──────────────────────────────────────────────────
+function renderLineChart(data,android){
+  var daily=(data.sales&&data.sales.daily)||[];
+  var sorted=daily.slice().sort(function(a,b){return a.date<b.date?-1:1;}).slice(-30);
+  var labels=sorted.map(function(d){
+    var dt=new Date(d.date); return (dt.getMonth()+1)+'/'+(dt.getDate());
+  });
+  var iosD=sorted.map(function(d){return d.downloads||0;});
+  var ctx=document.getElementById('lineC').getContext('2d');
+  if(_lineChart){_lineChart.destroy();}
+  _lineChart=new Chart(ctx,{
+    type:'line',
+    data:{labels:labels,datasets:[{
+      label:'iOS',data:iosD,borderColor:IOS,
+      backgroundColor:'rgba(6,182,212,.07)',
+      borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true
+    }]},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:false},
+        tooltip:{backgroundColor:'#1a1a2e',titleColor:'#eeeef5',
+          bodyColor:'#64647a',borderColor:'#1c1c2e',borderWidth:1,padding:8},
+        datalabels:{display:false}
       },
-      scales: {
-        x: {
-          grid: { display: false },
-          ticks: { maxTicksLimit: 8, maxRotation: 0 }
-        },
-        y: {
-          beginAtZero: true,
-          grid: { color: '#1e1e2d' },
-          ticks: { maxTicksLimit: 5 }
-        }
+      scales:{
+        x:{grid:{color:'#1c1c2e'},ticks:{maxTicksLimit:10,maxRotation:0}},
+        y:{grid:{color:'#1c1c2e'},beginAtZero:true,ticks:{precision:0}}
       }
     }
-  };
-  if (lineChart) {
-    lineChart.data.labels = labels;
-    lineChart.data.datasets = datasets;
-    lineChart.options.plugins.legend.display = datasets.length > 1;
-    lineChart.update('none');
-  } else {
-    lineChart = new Chart(ctx, cfg);
-  }
+  });
 }
 
-function buildBarChart(labels, dlData) {
-  var ctx = document.getElementById('barChart').getContext('2d');
-  var gradBar = ctx.createLinearGradient(0, 0, 0, 300);
-  gradBar.addColorStop(0, 'rgba(167,139,250,0.9)');
-  gradBar.addColorStop(1, 'rgba(167,139,250,0.4)');
-  var cfg = {
-    type: 'bar',
-    data: {
-      labels: labels,
-      datasets: [{
-        label: 'Downloads',
-        data: dlData,
-        backgroundColor: gradBar,
-        borderRadius: 6,
-        borderSkipped: false
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#14141f',
-          borderColor: '#1e1e2d',
-          borderWidth: 1,
-          titleColor: '#f0f0f5',
-          bodyColor: '#a0a0b0',
-          callbacks: {
-            label: function(ctx) { return ' ' + fmt(ctx.raw); }
+// ── Chart 2: Monthly Stacked Bar ──────────────────────────────────────────
+function renderBarChart(data,android){
+  var daily=(data.sales&&data.sales.daily)||[];
+  var mth={};
+  daily.forEach(function(d){
+    var ym=d.date.substring(0,7);
+    mth[ym]=(mth[ym]||0)+(d.downloads||0);
+  });
+  var months=Object.keys(mth).sort().slice(-12);
+  var lbls=months.map(function(ym){
+    var p=ym.split('-');
+    var names=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return names[parseInt(p[1])-1]+" '"+p[0].slice(2);
+  });
+  var iosV=months.map(function(m){return mth[m];});
+  var ctx=document.getElementById('barC').getContext('2d');
+  if(_barChart){_barChart.destroy();}
+  _barChart=new Chart(ctx,{
+    type:'bar',
+    data:{labels:lbls,datasets:[{
+      label:'iOS',data:iosV,
+      backgroundColor:'rgba(6,182,212,.65)',
+      borderColor:IOS,borderWidth:1,
+      borderRadius:{topLeft:4,topRight:4},stack:'s'
+    }]},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{
+        legend:{display:false},
+        tooltip:{backgroundColor:'#1a1a2e',titleColor:'#eeeef5',
+          bodyColor:'#64647a',borderColor:'#1c1c2e',borderWidth:1,padding:8},
+        datalabels:{
+          anchor:'end',align:'end',offset:4,
+          color:'#9999b0',font:{size:9,weight:'bold'},
+          formatter:function(v,ctx){
+            var tot=0;
+            ctx.chart.data.datasets.forEach(function(ds){tot+=(ds.data[ctx.dataIndex]||0);});
+            return tot>0?tot.toLocaleString():'';
+          },
+          display:function(ctx){
+            return ctx.datasetIndex===ctx.chart.data.datasets.length-1;
           }
         }
       },
-      scales: {
-        x: {
-          grid: { display: false },
-          ticks: { maxRotation: 0, maxTicksLimit: 8 }
-        },
-        y: {
-          beginAtZero: true,
-          grid: { color: '#1e1e2d' },
-          ticks: { maxTicksLimit: 5 }
-        }
+      scales:{
+        x:{grid:{display:false},stacked:true,ticks:{maxRotation:30}},
+        y:{grid:{color:'#1c1c2e'},stacked:true,beginAtZero:true,ticks:{precision:0}}
       }
-    }
-  };
-  if (barChart) {
-    barChart.data.labels = labels;
-    barChart.data.datasets[0].data = dlData;
-    barChart.update('none');
-  } else {
-    barChart = new Chart(ctx, cfg);
-  }
-}
-
-function buildDonut(dist) {
-  var ctx = document.getElementById('donutChart').getContext('2d');
-  var colors = ['#22c55e','#84cc16','#f59e0b','#f97316','#ef4444'];
-  var labels = ['5★','4★','3★','2★','1★'];
-  var vals = [dist[5]||0, dist[4]||0, dist[3]||0, dist[2]||0, dist[1]||0];
-  var cfg = {
-    type: 'doughnut',
-    data: {
-      labels: labels,
-      datasets: [{
-        data: vals,
-        backgroundColor: colors,
-        borderColor: '#10101a',
-        borderWidth: 2,
-        hoverOffset: 4
-      }]
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: '72%',
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#14141f',
-          borderColor: '#1e1e2d',
-          borderWidth: 1,
-          titleColor: '#f0f0f5',
-          bodyColor: '#a0a0b0'
-        }
-      }
-    }
-  };
-  if (donutChart) {
-    donutChart.data.datasets[0].data = vals;
-    donutChart.update('none');
-  } else {
-    donutChart = new Chart(ctx, cfg);
-  }
-}
-
-// ── Renderers ─────────────────────────────────────────────────────────────────
-function renderKPIs(data, analytics) {
-  var sales = (data && data.sales) || {};
-  var monthly = (data && data.monthly) || [];
-  var reviews = (data && data.reviews) || {};
-  var summary = (analytics && analytics.data && analytics.data.summary) || {};
-  var aStatus = (analytics && analytics.status) || 'pending';
-
-  // 1. Since Launch
-  var monthlyTotal = monthly.reduce(function(s, m){ return s + (m.units || 0); }, 0);
-  var todayYM = new Date().toISOString().slice(0,7);
-  var mtd = 0;
-  if (sales.daily) {
-    sales.daily.forEach(function(d) {
-      if (d.date && d.date.slice(0,7) === todayYM) mtd += (d.units || 0);
-    });
-  }
-  var launchTotal = monthlyTotal + mtd;
-  document.getElementById('k-launch').textContent = fmt(launchTotal);
-  document.getElementById('k-launch-badge').textContent = monthly.length + ' months of data';
-
-  // 2. Downloads 30d
-  var last30 = (sales.last30d && sales.last30d.units) || 0;
-  document.getElementById('k-30d').textContent = fmt(last30);
-  var chg30 = sales.change_30d_pct;
-  var badge30 = document.getElementById('k-30d-badge');
-  if (chg30 != null) {
-    badge30.textContent = pct(chg30) + ' vs prev 30d';
-    badge30.className = 'kpi-badge ' + (chg30 >= 0 ? 'badge-up' : 'badge-down');
-  }
-  var spark = (sales.sparkline || []);
-  document.getElementById('k-30d-spark').innerHTML = sparkSVG(spark, '#06b6d4');
-
-  // 3. Yesterday
-  var ydayUnits = (sales.yesterday && sales.yesterday.units) || 0;
-  document.getElementById('k-yday').textContent = fmt(ydayUnits);
-  document.getElementById('k-yday-sub').textContent = (sales.yesterday && sales.yesterday.date) || '';
-  document.getElementById('k-yday-spark').innerHTML = sparkSVG(spark, '#0ea5e9');
-  var last7chg = sales.last7d && sales.last7d.change_pct;
-  var b7 = document.getElementById('k-7d-badge');
-  if (last7chg != null) {
-    b7.textContent = pct(last7chg) + ' 7d';
-    b7.className = 'kpi-badge ' + (last7chg >= 0 ? 'badge-up' : 'badge-down');
-  }
-
-  // 4. Deletions 30d
-  var delWrap = document.getElementById('k-del-wrap');
-  var delBadge = document.getElementById('k-del-badge');
-  if (aStatus === 'ready' && summary.deletions_30d != null) {
-    delWrap.innerHTML = '<div class="kpi-value" style="color:var(--red)">' + fmt(summary.deletions_30d) + '</div>';
-    var net = last30 - (summary.deletions_30d || 0);
-    delBadge.textContent = 'Net ' + (net >= 0 ? '+' : '') + fmt(net);
-    delBadge.className = 'kpi-badge ' + (net >= 0 ? 'badge-up' : 'badge-down');
-  } else if (aStatus === 'error') {
-    delWrap.innerHTML = '<div class="kpi-value" style="color:var(--muted)">N/A</div>';
-  } else {
-    delWrap.innerHTML = '<div class="shimmer"></div>';
-    delBadge.textContent = '';
-  }
-
-  // 5. Rating
-  var avg = reviews.average;
-  document.getElementById('k-rating').textContent = avg != null ? avg.toFixed(1) + '★' : '—';
-  document.getElementById('k-rating-sub').textContent = fmt(reviews.count) + ' reviews';
-  var dist = reviews.distribution || {};
-  var total = Object.values(dist).reduce(function(s,v){ return s+v; }, 0) || 1;
-  var starColors = ['#22c55e','#84cc16','#f59e0b','#f97316','#ef4444'];
-  var starHTML = '';
-  for (var i = 5; i >= 1; i--) {
-    var w = Math.round(((dist[i]||0)/total)*100);
-    starHTML += '<div class="star-bar-row"><span>' + i + '</span>' +
-      '<div class="star-bar-track"><div class="star-bar-fill" style="width:' + w +
-      '%;background:' + starColors[5-i] + '"></div></div></div>';
-  }
-  document.getElementById('k-star-bars').innerHTML = starHTML;
-
-  // 6. Active devices 28d
-  var activeWrap = document.getElementById('k-active-wrap');
-  var activeSub = document.getElementById('k-active-sub');
-  if (aStatus === 'ready' && summary.active_d28 != null) {
-    activeWrap.innerHTML = '<div class="kpi-value" style="color:var(--green)">' + fmt(summary.active_d28) + '</div>';
-    if (summary.active_d1 != null) activeSub.textContent = 'DAU: ' + fmt(summary.active_d1);
-  } else if (aStatus === 'ready' && summary.sessions_30d != null) {
-    activeWrap.innerHTML = '<div class="kpi-value" style="color:var(--green)">' + fmt(summary.sessions_30d) + '</div>';
-    activeSub.textContent = 'Sessions 30d';
-  } else if (aStatus === 'error') {
-    activeWrap.innerHTML = '<div class="kpi-value" style="color:var(--muted)">N/A</div>';
-  } else {
-    activeWrap.innerHTML = '<div class="shimmer"></div>';
-    activeSub.textContent = '';
-  }
-}
-
-function renderCharts(data, analytics) {
-  var sales = (data && data.sales) || {};
-  var monthly = (data && data.monthly) || [];
-  var aStatus = (analytics && analytics.status) || 'pending';
-  var dailyAnalytics = (analytics && analytics.data && analytics.data.daily) || {};
-
-  var dailyArr = (sales.daily || []);
-  var labels = dailyArr.map(function(d){ return dayLabel(d.date); });
-  var dlVals = dailyArr.map(function(d){ return d.units || 0; });
-
-  var delVals = null;
-  if (aStatus === 'ready') {
-    var dv = dailyArr.map(function(d){
-      var ad = dailyAnalytics[d.date];
-      return ad ? (ad.deletions || 0) : 0;
-    });
-    if (dv.some(function(v){ return v > 0; })) delVals = dv;
-    document.getElementById('line-title').textContent = delVals
-      ? '30-Day Installs vs Deletions' : '30-Day Installs';
-  }
-
-  if (labels.length) buildLineChart(labels, dlVals, delVals);
-
-  if (monthly.length) {
-    var mLabels = monthly.map(function(m){ return moLabel(m.month); });
-    var mVals = monthly.map(function(m){ return m.units || 0; });
-    buildBarChart(mLabels, mVals);
-  }
-}
-
-function renderCountries(byCountry) {
-  var el = document.getElementById('countryList');
-  if (!byCountry || !byCountry.length) {
-    el.innerHTML = '<div style="color:var(--muted);font-size:.7rem">No data</div>';
-    return;
-  }
-  var maxVal = byCountry[0].units || 1;
-  var html = '';
-  byCountry.slice(0, 12).forEach(function(c, i) {
-    var flag = FLAGS[c.code] || '&#127760;';
-    var name = COUNTRY_NAMES[c.code] || c.code;
-    var w = Math.round((c.units / maxVal) * 100);
-    var color = BAR_COLORS[i % BAR_COLORS.length];
-    html += '<div class="country-row">' +
-      '<span class="country-flag">' + flag + '</span>' +
-      '<span class="country-name">' + name + '</span>' +
-      '<div class="country-bar-track"><div class="country-bar-fill" style="width:' + w +
-      '%;background:' + color + '"></div></div>' +
-      '<span class="country-num">' + fmt(c.units) + '</span></div>';
+    plugins:[ChartDataLabels]
   });
-  el.innerHTML = html;
 }
 
-function renderHealth(reviews, analytics, android) {
-  var dist = (reviews && reviews.distribution) || {};
-  var avg = reviews && reviews.average;
-  var aStatus = (analytics && analytics.status) || 'pending';
-  var summary = (analytics && analytics.data && analytics.data.summary) || {};
-  var retention = (analytics && analytics.data && analytics.data.retention) || {};
-  var andAvg = android && android.avg_rating;
-  var andCount = (android && android.rating_count) || 0;
-
-  // Show combined or iOS avg in donut center, with Android beside it
-  var displayAvg = avg != null ? avg.toFixed(1) : '—';
-  document.getElementById('donut-avg').textContent = displayAvg;
-  if (andAvg != null && andCount > 0) {
-    document.getElementById('donut-avg').title = 'iOS: ' + displayAvg + '  Android: ' + andAvg.toFixed(1);
+// ── Version Adoption ──────────────────────────────────────────────────────
+function renderVersions(android){
+  var vd=android.version_data||[];
+  var el=document.getElementById('verTable');
+  if(!vd.length){
+    var h='';
+    for(var i=0;i<6;i++)
+      h+='<div class="ver-row">'+sh('.75rem','65px')+sh('8px','100%')+sh('.75rem','35px')+'</div>';
+    el.innerHTML=h; return;
   }
-  if (Object.values(dist).some(function(v){ return v > 0; })) buildDonut(dist);
-
-  var total = Object.values(dist).reduce(function(s,v){ return s+v; }, 0) || 1;
-  var starColors = ['#22c55e','#84cc16','#f59e0b','#f97316','#ef4444'];
-  var dHtml = '';
-  for (var i = 5; i >= 1; i--) {
-    var w = Math.round(((dist[i]||0)/total)*100);
-    dHtml += '<div class="star-bar-row"><span>' + i + '★</span>' +
-      '<div class="star-bar-track" style="flex:1"><div class="star-bar-fill" style="width:' + w +
-      '%;background:' + starColors[5-i] + '"></div></div>' +
-      '<span style="width:28px;text-align:right;font-size:0.58rem;color:var(--muted)">' +
-      (dist[i]||0) + '</span></div>';
-  }
-  document.getElementById('distBars').innerHTML = dHtml;
-
-  var hm = document.getElementById('healthMetrics');
-  var hmHtml = '';
-  // Android vitals
-  if (andAvg != null && andCount > 0) {
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Rating</span>' +
-      '<span class="health-metric-value" style="color:var(--green)">' + andAvg.toFixed(1) + '&#9733; <span style="font-size:0.55rem;color:var(--muted)">(' + andCount + ')</span></span></div>';
-  }
-  var andCrashRate = android && android.crash_rate;
-  var andAnrRate = android && android.anr_rate;
-  var andCrashes30d = android && android.crash_count_30d;
-  var andUsers = android && android.distinct_users;
-  if (andCrashRate != null) {
-    var crashPct = (andCrashRate * 100).toFixed(2);
-    var crashColor = andCrashRate < 0.01 ? 'var(--green)' : andCrashRate < 0.05 ? 'var(--gold)' : 'var(--red)';
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Crash rate</span>' +
-      '<span class="health-metric-value" style="color:' + crashColor + '">' + crashPct + '%</span></div>';
-  }
-  if (andAnrRate != null) {
-    var anrPct = (andAnrRate * 100).toFixed(2);
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> ANR rate</span>' +
-      '<span class="health-metric-value" style="color:var(--muted)">' + anrPct + '%</span></div>';
-  }
-  if (andCrashes30d != null) {
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Crashes 30d</span>' +
-      '<span class="health-metric-value" style="color:var(--red)">' + fmt(andCrashes30d) + '</span></div>';
-  }
-  if (andUsers != null) {
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Active users</span>' +
-      '<span class="health-metric-value" style="color:var(--green)">' + fmt(andUsers) + '</span></div>';
-  }
-  var andActiveInstalls = android && android.active_installs;
-  var andDailyInstalls = android && android.daily_installs;
-  var andDailyUninstalls = android && android.daily_uninstalls;
-  var andInstalls30d = android && android.installs_30d;
-  var andUninstalls30d = android && android.uninstalls_30d;
-  if (andActiveInstalls != null) {
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Active installs</span>' +
-      '<span class="health-metric-value" style="color:var(--green)">' + fmt(andActiveInstalls) + '</span></div>';
-  }
-  if (andInstalls30d != null) {
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Installs 30d</span>' +
-      '<span class="health-metric-value" style="color:var(--cyan)">+' + fmt(andInstalls30d) +
-      (andDailyInstalls != null ? '<span style="font-size:0.55rem;color:var(--muted);margin-left:4px">~' + andDailyInstalls + '/day</span>' : '') +
-      '</span></div>';
-  }
-  if (andUninstalls30d != null) {
-    var netInstalls = (andInstalls30d || 0) - (andUninstalls30d || 0);
-    var netColor = netInstalls >= 0 ? 'var(--green)' : 'var(--red)';
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Uninstalls 30d</span>' +
-      '<span class="health-metric-value" style="color:var(--red)">-' + fmt(andUninstalls30d) +
-      (andDailyUninstalls != null ? '<span style="font-size:0.55rem;color:var(--muted);margin-left:4px">~' + andDailyUninstalls + '/day</span>' : '') +
-      '</span></div>';
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label"><span class="platform-android">Android</span> Net 30d</span>' +
-      '<span class="health-metric-value" style="color:' + netColor + '">' + (netInstalls >= 0 ? '+' : '') + fmt(netInstalls) + '</span></div>';
-  }
-  if (aStatus === 'ready') {
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label">Sessions 30d</span>' +
-      '<span class="health-metric-value">' + fmt(summary.sessions_30d) + '</span></div>';
-    var crashFree = (summary.sessions_30d && summary.crashes_30d != null)
-      ? (100 - (summary.crashes_30d / summary.sessions_30d * 100)).toFixed(2) + '% CF'
-      : '';
-    hmHtml += '<div class="health-metric-row">' +
-      '<span class="health-metric-label">Crashes 30d</span>' +
-      '<span class="health-metric-value" style="color:var(--red)">' + fmt(summary.crashes_30d) +
-      (crashFree ? '<span style="font-size:0.55rem;color:var(--muted);margin-left:4px">' + crashFree + '</span>' : '') +
-      '</span></div>';
-    var retDates = Object.keys(retention).sort().reverse();
-    if (retDates.length) {
-      var latest = retention[retDates[0]];
-      if (latest.d1 != null) {
-        hmHtml += '<div class="health-metric-row">' +
-          '<span class="health-metric-label">Retention D1</span>' +
-          '<span class="health-metric-value" style="color:var(--cyan)">' +
-          latest.d1.toFixed(1) + '%</span></div>';
-      }
-    }
-    hm.innerHTML = hmHtml || (shimmer() + shimmer() + shimmer());
-  } else {
-    hm.innerHTML = hmHtml + shimmer() + shimmer();
-  }
-}
-
-function renderReviews(reviews, android) {
-  var iosRecent = (reviews && reviews.recent) || [];
-  var andRecent = (android && android.reviews) || [];
-  // Tag iOS reviews
-  var iosTagged = iosRecent.map(function(r){ return Object.assign({}, r, {platform: r.platform || 'ios'}); });
-  // Merge and sort by date desc, take top 6
-  var all = iosTagged.concat(andRecent);
-  all.sort(function(a, b){ return (b.date || '').localeCompare(a.date || ''); });
-  var totalCount = ((reviews && reviews.count) || 0) + ((android && android.rating_count) || 0);
-  document.getElementById('reviewCount').textContent = fmt(totalCount);
-  var grid = document.getElementById('reviewsGrid');
-  if (!all.length) {
-    grid.innerHTML = '<div style="color:var(--muted);font-size:.7rem;grid-column:1/-1">No reviews</div>';
-    return;
-  }
-  var html = '';
-  all.slice(0, 6).forEach(function(r) {
-    var rNum = parseInt(r.rating) || 0;
-    var starStr = '★'.repeat(rNum) + '☆'.repeat(5 - rNum);
-    var platBadge = r.platform === 'android'
-      ? '<span class="platform-android">Android</span>'
-      : '<span class="platform-ios">iOS</span>';
-    var territory = (r.platform === 'android') ? '' : (r.territory || '');
-    html += '<div class="review-card">' +
-      '<div class="review-top">' +
-      '<span class="review-stars">' + starStr + '</span>' +
-      '<span class="review-meta">' + (territory || '') +
-      (r.date ? '<br>' + r.date : '') + '</span></div>' +
-      '<div class="review-title">' + String(r.title || '').replace(/</g,'&lt;').replace(/>/g,'&gt;') +
-      platBadge + '</div>' +
-      '<div class="review-body">' + String(r.body || '').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' +
+  var max=Math.max.apply(null,vd.map(function(v){return v.installs;}));
+  el.innerHTML=vd.map(function(v){
+    var p=max>0?(v.installs/max*100):0;
+    var c=v.platform==='ios'?IOS:AND;
+    return '<div class="ver-row">'+
+      '<span class="ver-lbl">v'+v.version+'</span>'+
+      '<div class="vbar-bg"><div class="vbar-fill" style="width:'+p.toFixed(1)+'%;background:'+c+'"></div></div>'+
+      '<span class="ver-cnt">'+fmt(v.installs)+'</span>'+
       '</div>';
-  });
-  grid.innerHTML = html;
+  }).join('');
 }
 
-function render(cache) {
-  if (!cache) return;
-  var data = cache.data || {};
-  var analytics = cache.analytics || { status: 'pending', data: { daily:{}, summary:{}, retention:{} } };
-  var android = cache.android || { reviews: [], avg_rating: null, rating_count: 0, dist: {} };
-  var now = new Date();
-  var mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  document.getElementById('datePill').textContent =
-    mo[now.getMonth()] + ' ' + now.getDate() + ', ' + now.getFullYear();
-  if (cache.updatedAt) {
-    var u = new Date(cache.updatedAt);
-    document.getElementById('updatedAt').textContent = 'Updated ' + u.toLocaleTimeString();
+// ── Reviews 2x2 ───────────────────────────────────────────────────────────
+function renderReviews(reviews,android){
+  var ios=((reviews&&reviews.recent)||[]).map(function(r){return Object.assign({},r,{platform:'ios'});});
+  var and=(android.reviews||[]).map(function(r){return Object.assign({},r,{platform:'android'});});
+  var out=[],ii=0,ai=0;
+  while(out.length<4&&(ii<ios.length||ai<and.length)){
+    if(ai<and.length) out.push(and[ai++]);
+    if(out.length<4&&ii<ios.length) out.push(ios[ii++]);
   }
-  renderKPIs(data, analytics);
-  renderCharts(data, analytics);
-  renderCountries((data.sales && data.sales.by_country) || []);
-  renderHealth(data.reviews, analytics, android);
-  renderReviews(data.reviews || {}, android);
+  var el=document.getElementById('revGrid');
+  if(!out.length){
+    el.innerHTML='<div class="rev-card">'+sh('.7rem')+sh('.65rem')+sh('3rem','100%')+'</div>'.repeat(4);
+    return;
+  }
+  el.innerHTML=out.slice(0,4).map(function(r){
+    var stars='';
+    for(var i=1;i<=5;i++) stars+=i<=(r.rating||0)?'&#9733;':'&#9734;';
+    var platCls=r.platform==='ios'?'ios-p':'and-p';
+    var platTxt=r.platform==='ios'?'&#127822; iOS':'&#129302; Android';
+    var body=(r.body||'').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    var author=(r.author||'Anonymous').replace(/</g,'&lt;');
+    return '<div class="rev-card">'+
+      '<div class="rev-hdr">'+
+        '<span class="rev-stars">'+stars+'</span>'+
+        '<span class="plat '+platCls+'">'+platTxt+'</span>'+
+        '<span class="rev-date">'+(r.date||'')+'</span>'+
+      '</div>'+
+      '<div class="rev-author">'+author+'</div>'+
+      '<div class="rev-body">'+(body||'<em style="color:var(--muted)">No review text</em>')+'</div>'+
+      '</div>';
+  }).join('');
 }
 
-// ── Poll ──────────────────────────────────────────────────────────────────────
-function poll() {
+// ── Main Render ───────────────────────────────────────────────────────────
+function render(cache){
+  if(!cache)return;
+  var data=cache.data||{};
+  var analytics=cache.analytics||{status:'pending',data:{daily:{},summary:{},retention:{}}};
+  var android=cache.android||{};
+  var now=new Date();
+  var mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  document.getElementById('datePill').textContent=mo[now.getMonth()]+' '+now.getDate()+', '+now.getFullYear();
+  if(cache.updatedAt){
+    var u=new Date(cache.updatedAt);
+    document.getElementById('updatedAt').textContent='Updated '+u.toLocaleTimeString();
+  }
+  renderDL(data,android);
+  renderDAU(analytics,android);
+  renderCF(analytics,android);
+  renderRating(data.reviews||{},android);
+  renderAI(android);
+  renderLineChart(data,android);
+  renderBarChart(data,android);
+  renderVersions(android);
+  renderReviews(data.reviews||{},android);
+}
+
+function poll(){
   fetch('/data')
-    .then(function(r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    })
-    .then(function(data) { render(data); })
-    .catch(function(e) { console.warn('Poll error:', e); });
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+    .then(function(d){render(d);})
+    .catch(function(e){console.warn('Poll:',e);});
 }
-
 poll();
-setInterval(poll, 5 * 60 * 1000);
+setInterval(poll,5*60*1000);
 </script>
 </body>
 </html>
