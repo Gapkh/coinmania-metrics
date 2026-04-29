@@ -83,7 +83,12 @@ def _fetch_one_day(date: str) -> tuple[str, dict | None]:
     try:
         r    = _get("/v1/salesReports", params=params, accept="application/a-gzip")
         rows = list(csv.DictReader(io.StringIO(gzip.decompress(r.content).decode()), delimiter="\t"))
-        ours = [row for row in rows if row.get("Apple Identifier") == ASC_APP_ID] or rows
+        # Product Type Identifier: '1'=first-time download, '1T'=re-download, '1F'/'1E'=updates (excluded)
+        DOWNLOAD_TYPES = {"1", "1T"}
+        all_app = [row for row in rows if row.get("Apple Identifier") == ASC_APP_ID] or rows
+        ours = [row for row in all_app if row.get("Product Type Identifier", "").strip() in DOWNLOAD_TYPES]
+        if not ours:
+            ours = all_app  # fallback if column missing
         units = sum(int(row["Units"]) for row in ours if str(row.get("Units","")).isdigit())
         by_cc: dict[str, int] = {}
         for row in ours:
