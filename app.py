@@ -1098,8 +1098,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   /* ── Header ───────────────────────────────────────────────────── */
   .hdr{display:flex;align-items:center;gap:10px}
-  .logo{font-size:1.1rem;font-weight:800;letter-spacing:-.5px}
-  .logo em{color:var(--gold);font-style:normal}
+  .logo img{height:26px;width:auto;display:block}
   .pill{background:var(--card);border:1px solid var(--border);border-radius:20px;
     padding:2px 10px;font-size:.68rem;color:var(--muted)}
   .live-badge{display:flex;align-items:center;gap:5px;margin-left:auto;
@@ -1189,7 +1188,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <!-- Header -->
 <div class="hdr">
-  <span class="logo">Coin<em>mania</em></span>
+  <span class="logo"><img src="https://coinmania.ge/Images/coinmania.webp" alt="Coinmania"></span>
   <span class="pill" id="datePill">&#8212;</span>
   <span class="pill" id="updatedAt">&#8212;</span>
   <span class="live-badge"><span class="live-dot"></span>LIVE</span>
