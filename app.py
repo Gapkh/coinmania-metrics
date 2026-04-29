@@ -83,12 +83,12 @@ def _make_jwt():
     return token if isinstance(token, str) else token.decode()
 
 
-def _auth_headers():
-    return {"Authorization": f"Bearer {_make_jwt()}", "Accept": "application/json"}
+def _auth_headers(accept="application/json"):
+    return {"Authorization": f"Bearer {_make_jwt()}", "Accept": accept}
 
 
-def _get(url, params=None, timeout=30):
-    resp = requests.get(url, headers=_auth_headers(), params=params, timeout=timeout)
+def _get(url, params=None, timeout=30, accept="application/json"):
+    resp = requests.get(url, headers=_auth_headers(accept), params=params, timeout=timeout)
     resp.raise_for_status()
     return resp
 
@@ -115,9 +115,9 @@ def _fetch_one_day(date_str):
     }
     url = f"{BASE_URL}/v1/salesReports"
     try:
-        resp = _get(url, params=params, timeout=30)
+        resp = _get(url, params=params, timeout=30, accept="application/a-gzip")
         content = resp.content
-        if resp.headers.get("Content-Encoding") == "gzip" or content[:2] == b"\x1f\x8b":
+        if content[:2] == b"\x1f\x8b":
             content = gzip.decompress(content)
         text = content.decode("utf-8")
         rows = []
