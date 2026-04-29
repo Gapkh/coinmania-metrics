@@ -33,6 +33,7 @@ REFRESH_SECRET = os.environ.get("REFRESH_SECRET", "")
 ANDROID_PACKAGE = os.environ.get("ANDROID_PACKAGE", "com.coinmania.app")
 ANDROID_SA_JSON_BASE64 = os.environ.get("ANDROID_SA_JSON_BASE64", "")
 ANDROID_SA_JSON_PATH = os.environ.get("ANDROID_SA_JSON_PATH", "")
+ANDROID_GCS_BUCKET = os.environ.get("ANDROID_GCS_BUCKET", "pubsite_prod_8621543385680213141")
 
 def _load_private_key():
     raw = os.environ.get("ASC_PRIVATE_KEY", "").strip()
@@ -80,6 +81,12 @@ _android_state = {
     "anr_rate": None,         # 7-day user-weighted ANR rate
     "crash_count_30d": None,  # total crash reports last 30d
     "distinct_users": None,   # latest distinct users from vitals
+    # GCS installs data
+    "active_installs": None,  # latest Active Device Installs
+    "daily_installs": None,   # avg Daily User Installs (last 30 days)
+    "daily_uninstalls": None, # avg Daily User Uninstalls (last 30 days)
+    "installs_30d": None,     # total Daily User Installs summed over last 30 days
+    "uninstalls_30d": None,   # total Daily User Uninstalls summed over last 30 days
     "error": None,
     "fetched_at": None,
 }
@@ -804,6 +811,103 @@ def _fetch_android_data():
     except Exception as e:
         log.warning("Android vitals error: %s", e)
 
+    # --- Fetch installs/uninstalls from GCS bulk reports ---
+    active_installs = None
+    daily_installs = None
+    daily_uninstalls = None
+    installs_30d = None
+    uninstalls_30d = None
+    try:
+        from google.oauth2 import service_account as _sa
+        from google.cloud import storage as _gcs
+
+        gcs_creds = _sa.Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/devstorage.read_only"],
+        )
+        gcs_client = _gcs.Client(credentials=gcs_creds, project=sa_info.get("project_id"))
+        gcs_bucket_name = ANDROID_GCS_BUCKET
+
+        today = datetime.now(timezone.utc).date()
+        # We need current month and optionally previous month to get ~30 days
+        months_to_try = []
+        months_to_try.append(today.strftime("%Y%m"))  # current month e.g. "202604"
+        # also grab last month for earlier rows
+        first_of_month = today.replace(day=1)
+        prev_month = (first_of_month - timedelta(days=1)).strftime("%Y%m")
+        months_to_try.append(prev_month)
+
+        def _read_installs_csv(blob_name):
+            """Download and parse a Play Console installs overview CSV. Returns list of dicts."""
+            try:
+                bucket = gcs_client.bucket(gcs_bucket_name)
+                blob = bucket.blob(blob_name)
+                raw = blob.download_as_bytes(timeout=20)
+                # Files are UTF-16 LE with BOM
+                txt = raw.decode("utf-16")
+                rows = []
+                lines = txt.strip().splitlines()
+                if not lines:
+                    return []
+                hdrs = [h.strip() for h in lines[0].split(",")]
+                for line in lines[1:]:
+                    if not line.strip():
+                        continue
+                    parts = line.split(",")
+                    row = dict(zip(hdrs, parts))
+                    rows.append(row)
+                return rows
+            except Exception as e:
+                log.debug("GCS read %s: %s", blob_name, e)
+                return None  # None = access error; [] = empty file
+
+        all_rows = []
+        for ym in months_to_try:
+            blob_name = f"stats/installs/installs_{ANDROID_PACKAGE}_{ym}_overview.csv"
+            rows = _read_installs_csv(blob_name)
+            if rows is None:
+                log.info("GCS installs access denied or unavailable for %s", ym)
+                break  # stop trying; access not yet granted
+            all_rows.extend(rows)
+
+        if all_rows:
+            # Sort by date descending
+            all_rows.sort(key=lambda r: r.get("Date", ""), reverse=True)
+            # Last 30 days
+            cutoff = (today - timedelta(days=30)).isoformat()
+            recent = [r for r in all_rows if r.get("Date", "") >= cutoff]
+            if not recent:
+                recent = all_rows[:30]
+
+            # Active Device Installs from latest row
+            latest = all_rows[0]
+            try:
+                active_installs = int(float(latest.get("Active Device Installs", 0) or 0))
+            except (ValueError, TypeError):
+                pass
+
+            # Daily User Installs / Uninstalls averages
+            inst_vals = []
+            uninst_vals = []
+            for r in recent:
+                try:
+                    inst_vals.append(int(float(r.get("Daily User Installs", 0) or 0)))
+                    uninst_vals.append(int(float(r.get("Daily User Uninstalls", 0) or 0)))
+                except (ValueError, TypeError):
+                    pass
+            if inst_vals:
+                installs_30d = sum(inst_vals)
+                daily_installs = round(sum(inst_vals) / len(inst_vals), 1)
+            if uninst_vals:
+                uninstalls_30d = sum(uninst_vals)
+                daily_uninstalls = round(sum(uninst_vals) / len(uninst_vals), 1)
+
+            log.info("Android installs: active=%s, daily_avg=%s, uninstall_avg=%s",
+                     active_installs, daily_installs, daily_uninstalls)
+
+    except Exception as e:
+        log.warning("Android GCS installs error: %s", e)
+
     with _android_lock:
         _android_state["reviews"] = reviews[:12]
         _android_state["avg_rating"] = avg_rating
@@ -813,6 +917,11 @@ def _fetch_android_data():
         _android_state["anr_rate"] = anr_rate
         _android_state["crash_count_30d"] = crash_count_30d
         _android_state["distinct_users"] = distinct_users
+        _android_state["active_installs"] = active_installs
+        _android_state["daily_installs"] = daily_installs
+        _android_state["daily_uninstalls"] = daily_uninstalls
+        _android_state["installs_30d"] = installs_30d
+        _android_state["uninstalls_30d"] = uninstalls_30d
         _android_state["error"] = error
         _android_state["fetched_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -1778,6 +1887,35 @@ function renderHealth(reviews, analytics, android) {
     hmHtml += '<div class="health-metric-row">' +
       '<span class="health-metric-label"><span class="platform-android">Android</span> Active users</span>' +
       '<span class="health-metric-value" style="color:var(--green)">' + fmt(andUsers) + '</span></div>';
+  }
+  var andActiveInstalls = android && android.active_installs;
+  var andDailyInstalls = android && android.daily_installs;
+  var andDailyUninstalls = android && android.daily_uninstalls;
+  var andInstalls30d = android && android.installs_30d;
+  var andUninstalls30d = android && android.uninstalls_30d;
+  if (andActiveInstalls != null) {
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Active installs</span>' +
+      '<span class="health-metric-value" style="color:var(--green)">' + fmt(andActiveInstalls) + '</span></div>';
+  }
+  if (andInstalls30d != null) {
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Installs 30d</span>' +
+      '<span class="health-metric-value" style="color:var(--cyan)">+' + fmt(andInstalls30d) +
+      (andDailyInstalls != null ? '<span style="font-size:0.55rem;color:var(--muted);margin-left:4px">~' + andDailyInstalls + '/day</span>' : '') +
+      '</span></div>';
+  }
+  if (andUninstalls30d != null) {
+    var netInstalls = (andInstalls30d || 0) - (andUninstalls30d || 0);
+    var netColor = netInstalls >= 0 ? 'var(--green)' : 'var(--red)';
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Uninstalls 30d</span>' +
+      '<span class="health-metric-value" style="color:var(--red)">-' + fmt(andUninstalls30d) +
+      (andDailyUninstalls != null ? '<span style="font-size:0.55rem;color:var(--muted);margin-left:4px">~' + andDailyUninstalls + '/day</span>' : '') +
+      '</span></div>';
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Net 30d</span>' +
+      '<span class="health-metric-value" style="color:' + netColor + '">' + (netInstalls >= 0 ? '+' : '') + fmt(netInstalls) + '</span></div>';
   }
   if (aStatus === 'ready') {
     hmHtml += '<div class="health-metric-row">' +
