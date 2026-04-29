@@ -1098,6 +1098,16 @@ def data_route():
     android_snap["ios_dau_latest"] = _hist._latest(_hist.IOS_DAU)
     # iOS MAU latest from historical CSV
     android_snap["ios_mau_latest"] = _hist._latest(_hist.IOS_MAU)
+    # MAU time series for chart (weekly samples)
+    android_snap["mau_hist"] = _hist.get_mau_series()
+    # Android day-before-yesterday for Yesterday % change
+    _and_dl_sorted = sorted(k for k in _hist.AND_DOWNLOADS if k < _today.isoformat())
+    android_snap["and_day_before"] = _hist.AND_DOWNLOADS.get(_and_dl_sorted[-2]) if len(_and_dl_sorted) >= 2 else None
+    # Previous-day DAU values for DAU % change
+    _ios_dau_keys = sorted(_hist.IOS_DAU.keys())
+    _and_dau_keys = sorted(_hist.AND_DAU.keys())
+    android_snap["ios_dau_prev"] = _hist.IOS_DAU.get(_ios_dau_keys[-2]) if len(_ios_dau_keys) >= 2 else None
+    android_snap["and_dau_prev"] = _hist.AND_DAU.get(_and_dau_keys[-2]) if len(_and_dau_keys) >= 2 else None
     return jsonify({**cache_snap, "analytics": analytics_snap, "android": android_snap})
 
 
@@ -1293,7 +1303,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="kpi" style="--accent:var(--android)">
     <div class="kpi-lbl">Daily Active Users</div>
     <div class="kpi-val" id="k-dau">&#8212;</div>
-    <div class="kpi-trend"></div>
+    <div class="kpi-trend" id="k-dau-t"></div>
     <div class="kpi-plat">
       <div class="kpi-prow"><span class="plt ios">iOS</span><span class="pnum" id="k-dau-ios">&#8212;</span></div>
       <div class="kpi-prow"><span class="plt and">Android</span><span class="pnum" id="k-dau-and">&#8212;</span></div>
@@ -1339,8 +1349,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <!-- Row 3: Versions + Reviews -->
 <div class="bot-row">
   <div class="bot-card">
-    <div class="card-ttl">App Version Adoption &middot; Android</div>
-    <div class="ver-table" id="verTable"></div>
+    <div class="card-ttl" style="display:flex;align-items:center;gap:8px">Monthly Active Users &middot; All Time
+      <span class="ldot" style="--dc:var(--ios)">iOS</span>
+      <span class="ldot" style="--dc:var(--android)">Android</span>
+    </div>
+    <div class="cw"><canvas id="mauC"></canvas></div>
   </div>
   <div class="bot-card">
     <div class="card-ttl">Recent Reviews</div>
@@ -1380,7 +1393,7 @@ function setPlat(iosId, andId, barId, iosVal, andVal){
   }
 }
 
-var _cfChart=null, _lineChart=null, _barChart=null;
+var _cfChart=null, _lineChart=null, _barChart=null, _mauChart=null;
 
 // ── Card 1: Since Launch ──────────────────────────────────────────────────
 function renderSL(data,android){
@@ -1427,12 +1440,27 @@ function renderDL(data,android){
 function renderYD(data,android){
   var daily=(data.sales&&data.sales.daily)||[];
   var yest=new Date(); yest.setDate(yest.getDate()-1);
+  var dayBefore=new Date(); dayBefore.setDate(dayBefore.getDate()-2);
   var yStr=yest.toISOString().slice(0,10);
-  var iosYd=0;
-  daily.forEach(function(d){ if(d.date===yStr) iosYd+=(d.units||0); });
+  var dbStr=dayBefore.toISOString().slice(0,10);
+  var iosYd=0, iosDayBefore=0;
+  daily.forEach(function(d){
+    if(d.date===yStr) iosYd+=(d.units||0);
+    if(d.date===dbStr) iosDayBefore+=(d.units||0);
+  });
   var andYd=android.installs_yesterday||null;
+  var andDb=android.and_day_before||null;
   var total=iosYd+(andYd||0);
   document.getElementById('k-yd').innerHTML=fmtN(total||null);
+  var te=document.getElementById('k-yd-t');
+  if(te){
+    var prevTotal=iosDayBefore+(andDb||0);
+    if(prevTotal>0&&total>0){
+      var pct=Math.round((total-prevTotal)/prevTotal*100);
+      te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev day';
+      te.className='kpi-trend '+(pct>=0?'up':'dn');
+    }
+  }
   setPlat('k-yd-ios','k-yd-and','k-yd-bar',iosYd||null,andYd);
 }
 
@@ -1447,6 +1475,20 @@ function renderDAU(analytics,android){
   var andU=android.distinct_users||null;
   var total=(iosDau||0)+(andU||0);
   document.getElementById('k-dau').innerHTML=total>0?fmtN(total):(andU?fmtN(andU):sh('2rem'));
+  // % change vs previous day (using historical data)
+  var te=document.getElementById('k-dau-t');
+  if(te){
+    var iosLatest=android.ios_dau_latest||null;
+    var iosPrev=android.ios_dau_prev||null;
+    var andPrev=android.and_dau_prev||null;
+    var cur=(iosLatest||0)+(andU||0);
+    var prev=(iosPrev||0)+(andPrev||0);
+    if(prev>0&&cur>0){
+      var pct=Math.round((cur-prev)/prev*100);
+      te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev day';
+      te.className='kpi-trend '+(pct>=0?'up':'dn');
+    }
+  }
   setPlat('k-dau-ios','k-dau-and','k-dau-bar',iosDau,andU);
 }
 
@@ -1536,6 +1578,8 @@ function renderLineChart(data,android){
   });
   var iosD=sorted.map(function(d){return d.units||0;});
   var andD=sorted.map(function(d){return andMap[d.date]||0;});
+  var combD=sorted.map(function(d,i){return(iosD[i]||0)+(andD[i]||0);});
+  var n=sorted.length;
   var ctx=document.getElementById('lineC').getContext('2d');
   if(_lineChart){_lineChart.destroy();}
   _lineChart=new Chart(ctx,{
@@ -1543,10 +1587,173 @@ function renderLineChart(data,android){
     data:{labels:labels,datasets:[
       {label:'Android',data:andD,borderColor:AND,
         backgroundColor:'rgba(34,197,94,.06)',
-        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true},
+        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true,
+        datalabels:{display:false}},
       {label:'iOS',data:iosD,borderColor:IOS,
         backgroundColor:'rgba(6,182,212,.08)',
-        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true}
+        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.3,fill:true,
+        datalabels:{display:false}},
+      {label:'_comb',data:combD,
+        borderColor:'rgba(255,255,255,.15)',borderWidth:1,
+        backgroundColor:'rgba(0,0,0,0)',
+        pointRadius:0,tension:.3,fill:false,
+        datalabels:{
+          display:function(ctx){
+            var i=ctx.dataIndex;
+            return i===n-1||i%5===0;
+          },
+          anchor:'center',align:'top',offset:6,
+          color:'rgba(200,200,220,.8)',font:{size:8,weight:'600'},
+          formatter:function(v){return v>0?v.toLocaleString():null;}
+        }}
+    ]},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      interaction:{mode:'index',intersect:false},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#0d0d1a',titleColor:'#eeeef5',
+          bodyColor:'#9999b8',borderColor:'#1a1a2e',borderWidth:1,padding:10,
+          filter:function(item){return item.dataset.label!=='_comb';},
+          callbacks:{
+            afterBody:function(items){
+              var fl=items.filter(function(i){return i.dataset.label!=='_comb';});
+              var tot=fl.reduce(function(s,i){return s+(i.parsed.y||0);},0);
+              return tot>0?['─────────','Total: '+tot.toLocaleString()]:'';
+            }
+          }
+        },
+        datalabels:{display:false}
+      },
+      scales:{
+        x:{grid:{color:'rgba(26,26,46,.8)'},ticks:{maxTicksLimit:10,maxRotation:0}},
+        y:{grid:{color:'rgba(26,26,46,.8)'},beginAtZero:true,ticks:{precision:0}}
+      }
+    },
+    plugins:[ChartDataLabels]
+  });
+}
+
+// ── Chart 2: Monthly Stacked Bar ─────────────────────────────────────────
+function renderBarChart(data,android){
+  var iosMonthly=(data.monthly||[]).slice(-12);
+  var andMonthly=(android.monthly_hist||[]);
+  var andMap={};
+  andMonthly.forEach(function(m){andMap[m.month]=m.units||0;});
+  var months=iosMonthly.map(function(m){return m.month;});
+  var names=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var lbls=months.map(function(mo){
+    var p=mo.split('-');
+    return names[parseInt(p[1])-1]+" '"+p[0].slice(2);
+  });
+  var iosV=iosMonthly.map(function(m){return m.units||0;});
+  var andV=months.map(function(mo){return andMap[mo]||0;});
+  var maxBar=0;
+  months.forEach(function(mo,i){maxBar=Math.max(maxBar,(iosV[i]||0)+(andV[i]||0));});
+  var ctx=document.getElementById('barC').getContext('2d');
+  if(_barChart){_barChart.destroy();}
+  _barChart=new Chart(ctx,{
+    type:'bar',
+    data:{labels:lbls,datasets:[
+      {
+        label:'Android',data:andV,
+        backgroundColor:'rgba(34,197,94,.5)',
+        borderColor:'rgba(34,197,94,.8)',borderWidth:1,
+        borderRadius:0,stack:'s',
+        datalabels:{
+          display:function(ctx){return(ctx.dataset.data[ctx.dataIndex]||0)>=100;},
+          anchor:'center',align:'center',
+          color:'rgba(255,255,255,.9)',font:{size:8,weight:'600'},
+          formatter:function(v){return v>0?Math.round(v).toLocaleString():null;}
+        }
+      },
+      {
+        label:'iOS',data:iosV,
+        backgroundColor:'rgba(6,182,212,.6)',
+        borderColor:'rgba(6,182,212,.9)',borderWidth:1,
+        borderRadius:{topLeft:4,topRight:4},stack:'s',
+        datalabels:{
+          display:function(ctx){return(ctx.dataset.data[ctx.dataIndex]||0)>=100;},
+          anchor:'center',align:'center',
+          color:'rgba(255,255,255,.9)',font:{size:8,weight:'600'},
+          formatter:function(v){return v>0?Math.round(v).toLocaleString():null;}
+        }
+      },
+      {
+        label:'_tot',data:months.map(function(){return 1;}),
+        backgroundColor:'rgba(0,0,0,0)',borderWidth:0,
+        stack:'s',
+        datalabels:{
+          display:true,
+          anchor:'end',align:'top',offset:2,
+          color:'#c0c0d8',font:{size:9,weight:'bold'},
+          formatter:function(v,ctx){
+            var i=ctx.dataIndex;
+            var tot=(iosV[i]||0)+(andV[i]||0);
+            return tot>0?tot.toLocaleString():null;
+          }
+        }
+      }
+    ]},
+    options:{
+      responsive:true,maintainAspectRatio:false,
+      layout:{padding:{top:24}},
+      plugins:{
+        legend:{display:false},
+        tooltip:{
+          backgroundColor:'#0d0d1a',titleColor:'#eeeef5',
+          bodyColor:'#9999b8',borderColor:'#1a1a2e',borderWidth:1,padding:10,
+          filter:function(item){return item.dataset.label!=='_tot';},
+          callbacks:{
+            label:function(item){
+              return '  '+item.dataset.label+': '+item.parsed.y.toLocaleString();
+            },
+            afterBody:function(items){
+              var fl=items.filter(function(i){return i.dataset.label!=='_tot';});
+              if(!fl.length)return'';
+              var i=fl[0].dataIndex;
+              var tot=(iosV[i]||0)+(andV[i]||0);
+              return tot>0?['','  Total: '+tot.toLocaleString()]:'';
+            }
+          }
+        },
+        datalabels:{}
+      },
+      scales:{
+        x:{grid:{display:false},stacked:true,ticks:{maxRotation:0}},
+        y:{grid:{color:'rgba(26,26,46,.8)'},stacked:true,beginAtZero:true,
+          suggestedMax:Math.max(500,Math.ceil(maxBar*1.22/100)*100),
+          ticks:{precision:0}}
+      }
+    },
+    plugins:[ChartDataLabels]
+  });
+}
+
+// ── MAU Chart ────────────────────────────────────────────────────────────
+function renderMAUChart(android){
+  var series=android.mau_hist||[];
+  if(!series.length)return;
+  var labels=series.map(function(d){
+    var dt=new Date(d.date+'T12:00:00');
+    return (dt.getMonth()+1)+'/'+(dt.getDate());
+  });
+  var iosD=series.map(function(d){return d.ios||0;});
+  var andD=series.map(function(d){return d.and||0;});
+  var el=document.getElementById('mauC');
+  if(!el)return;
+  var ctx=el.getContext('2d');
+  if(_mauChart){_mauChart.destroy();_mauChart=null;}
+  _mauChart=new Chart(ctx,{
+    type:'line',
+    data:{labels:labels,datasets:[
+      {label:'Android',data:andD,borderColor:AND,
+        backgroundColor:'rgba(34,197,94,.07)',
+        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.35,fill:true},
+      {label:'iOS',data:iosD,borderColor:IOS,
+        backgroundColor:'rgba(6,182,212,.09)',
+        borderWidth:2,pointRadius:0,pointHoverRadius:4,tension:.35,fill:true}
     ]},
     options:{
       responsive:true,maintainAspectRatio:false,
@@ -1566,100 +1773,10 @@ function renderLineChart(data,android){
         datalabels:{display:false}
       },
       scales:{
-        x:{grid:{color:'rgba(26,26,46,.8)'},ticks:{maxTicksLimit:10,maxRotation:0}},
+        x:{grid:{color:'rgba(26,26,46,.8)'},ticks:{maxTicksLimit:9,maxRotation:0}},
         y:{grid:{color:'rgba(26,26,46,.8)'},beginAtZero:true,ticks:{precision:0}}
       }
     }
-  });
-}
-
-// ── Chart 2: Monthly Stacked Bar ─────────────────────────────────────────
-function renderBarChart(data,android){
-  var iosMonthly=(data.monthly||[]).slice(-12);
-  var andMonthly=(android.monthly_hist||[]);
-  var andMap={};
-  andMonthly.forEach(function(m){andMap[m.month]=m.units||0;});
-  var months=iosMonthly.map(function(m){return m.month;});
-  var names=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var lbls=months.map(function(mo){
-    var p=mo.split('-');
-    return names[parseInt(p[1])-1]+" '"+p[0].slice(2);
-  });
-  var iosV=iosMonthly.map(function(m){return m.units||0;});
-  var andV=months.map(function(mo){return andMap[mo]||0;});
-  // Headroom: 18% above tallest bar so labels never clip
-  var maxBar=0;
-  months.forEach(function(mo,i){maxBar=Math.max(maxBar,(iosV[i]||0)+(andV[i]||0));});
-  var ctx=document.getElementById('barC').getContext('2d');
-  if(_barChart){_barChart.destroy();}
-  _barChart=new Chart(ctx,{
-    type:'bar',
-    data:{labels:lbls,datasets:[
-      {
-        label:'Android',data:andV,
-        backgroundColor:'rgba(34,197,94,.5)',
-        borderColor:'rgba(34,197,94,.8)',borderWidth:1,
-        borderRadius:0,stack:'s',
-        datalabels:{
-          anchor:'center',align:'center',
-          color:'rgba(255,255,255,.85)',font:{size:8,weight:'600'},
-          formatter:function(v){return v>=200?v.toLocaleString():null;}
-        }
-      },
-      {
-        label:'iOS',data:iosV,
-        backgroundColor:'rgba(6,182,212,.6)',
-        borderColor:'rgba(6,182,212,.9)',borderWidth:1,
-        borderRadius:{topLeft:4,topRight:4},stack:'s',
-        datalabels:{
-          labels:{
-            inside:{
-              anchor:'center',align:'center',
-              color:'rgba(255,255,255,.85)',font:{size:8,weight:'600'},
-              formatter:function(v){return v>=200?v.toLocaleString():null;}
-            },
-            total:{
-              anchor:'end',align:'end',offset:4,
-              color:'#b0b0cc',font:{size:9,weight:'bold'},
-              formatter:function(v,ctx){
-                var i=ctx.dataIndex;
-                var tot=(iosV[i]||0)+(andV[i]||0);
-                return tot>0?tot.toLocaleString():null;
-              }
-            }
-          }
-        }
-      }
-    ]},
-    options:{
-      responsive:true,maintainAspectRatio:false,
-      layout:{padding:{top:22}},
-      plugins:{
-        legend:{display:false},
-        tooltip:{
-          backgroundColor:'#0d0d1a',titleColor:'#eeeef5',
-          bodyColor:'#9999b8',borderColor:'#1a1a2e',borderWidth:1,padding:10,
-          callbacks:{
-            label:function(item){
-              return '  '+item.dataset.label+': '+item.parsed.y.toLocaleString();
-            },
-            afterBody:function(items){
-              var i=items[0]?items[0].dataIndex:0;
-              var tot=(iosV[i]||0)+(andV[i]||0);
-              return tot>0?['','  Total: '+tot.toLocaleString()]:'';
-            }
-          }
-        },
-        datalabels:{display:false}
-      },
-      scales:{
-        x:{grid:{display:false},stacked:true,ticks:{maxRotation:0}},
-        y:{grid:{color:'rgba(26,26,46,.8)'},stacked:true,beginAtZero:true,
-          suggestedMax:Math.max(500,Math.ceil(maxBar*1.22/100)*100),
-          ticks:{precision:0}}
-      }
-    },
-    plugins:[ChartDataLabels]
   });
 }
 
@@ -1747,7 +1864,7 @@ function render(cache){
   renderRating(data.reviews||{},android);
   renderLineChart(data,android);
   renderBarChart(data,android);
-  renderVersions(android);
+  renderMAUChart(android);
   renderReviews(data.reviews||{},android);
 }
 

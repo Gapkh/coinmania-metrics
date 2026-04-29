@@ -507,3 +507,39 @@ def get_android_monthly_historical():
         month = date_str[:7]
         monthly[month] = monthly.get(month, 0) + units
     return [{"month": m, "units": v} for m, v in sorted(monthly.items())]
+
+
+def get_mau_series(sample_days=7):
+    """
+    Return a merged iOS + Android MAU time series, sampled every sample_days days.
+    Returns list of {date, ios, and} sorted by date ascending.
+    """
+    all_dates = sorted(set(list(IOS_MAU.keys()) + list(AND_MAU.keys())))
+    if not all_dates:
+        return []
+    result = []
+    last_included = None
+    for date_str in all_dates:
+        if last_included is None:
+            include = True
+        else:
+            from datetime import date as _date
+            dt_curr = datetime.strptime(date_str, "%Y-%m-%d").date()
+            dt_last = datetime.strptime(last_included, "%Y-%m-%d").date()
+            include = (dt_curr - dt_last).days >= sample_days
+        if include:
+            result.append({
+                "date": date_str,
+                "ios": IOS_MAU.get(date_str),
+                "and": AND_MAU.get(date_str),
+            })
+            last_included = date_str
+    # Always include the last date
+    last = all_dates[-1]
+    if result and result[-1]["date"] != last:
+        result.append({
+            "date": last,
+            "ios": IOS_MAU.get(last),
+            "and": AND_MAU.get(last),
+        })
+    return result
