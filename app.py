@@ -1112,7 +1112,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   /* ── KPI Row ──────────────────────────────────────────────────── */
-  .kpi-row{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+  .kpi-row{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
   .kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;
     padding:9px 12px 8px;display:flex;flex-direction:column;gap:2px;
     position:relative;overflow:hidden;min-height:0}
@@ -1122,7 +1122,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .kpi-val{font-size:1.6rem;font-weight:700;line-height:1.05;letter-spacing:-1px}
   .kpi-trend{font-size:.63rem;font-weight:600;min-height:.85rem}
-  .kpi-split{font-size:.6rem;color:var(--muted);margin-top:auto}
+  .kpi-split{font-size:.6rem;color:var(--muted);margin-top:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .kpi-split .ios{color:var(--ios)} .kpi-split .and{color:var(--android)}
   .sep{color:#3a3a50}
   .kpi-spark{flex:1;min-height:0;margin-top:3px;position:relative}
@@ -1227,12 +1227,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="kpi-val" id="k-rt">&#8212;</div>
     <div class="kpi-split" id="k-rt-s"></div>
     <div class="kpi-stars" id="k-stars"></div>
-  </div>
-  <div class="kpi" style="--accent:var(--android)">
-    <div class="kpi-lbl">Active Installs &middot; Android</div>
-    <div class="kpi-val" id="k-ai">&#8212;</div>
-    <div class="kpi-trend" id="k-ai-t"></div>
-    <div class="kpi-split" id="k-ai-s"></div>
   </div>
 </div>
 
@@ -1439,23 +1433,6 @@ function renderRating(reviews,android){
   }
 }
 
-// ── Card 7: Active Installs ───────────────────────────────────────────────
-function renderAI(android){
-  var ai=android.active_installs;
-  var i30=android.installs_30d, u30=android.uninstalls_30d;
-  document.getElementById('k-ai').innerHTML=ai!=null?fmtN(ai):sh('1.85rem');
-  var te=document.getElementById('k-ai-t');
-  if(i30!=null&&u30!=null){
-    var net=i30-u30;
-    te.innerHTML=(net>=0?'&#9650; +':'&#9660; ')+fmtN(net)+' net 30d';
-    te.className='kpi-trend '+(net>=0?'up':'dn');
-  }
-  var parts=[];
-  if(i30) parts.push('<span class="and">+'+fmtN(i30)+' installs</span>');
-  if(u30) parts.push('<span style="color:var(--red)">&#8722;'+fmtN(u30)+'</span>');
-  document.getElementById('k-ai-s').innerHTML=
-    parts.join(' ')||'<span class="mu">'+(ai?'Android':'Pending GCS access')+'</span>';
-}
 
 // ── Chart 1: 30-Day Line ──────────────────────────────────────────────────
 function renderLineChart(data,android){
@@ -1612,7 +1589,6 @@ function render(cache){
   renderDAU(analytics,android);
   renderCF(analytics,android);
   renderRating(data.reviews||{},android);
-  renderAI(android);
   renderLineChart(data,android);
   renderBarChart(data,android);
   renderVersions(android);
