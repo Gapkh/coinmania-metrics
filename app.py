@@ -1305,23 +1305,18 @@ function renderSL(data,android){
 // ── Card 2: Downloads 30D ─────────────────────────────────────────────────
 function renderDL(data,android){
   var daily=(data.sales&&data.sales.daily)||[];
-  var now=Date.now(), d30=now-30*864e5, d60=now-60*864e5;
-  var ios30=0, iosPrev=0;
-  daily.forEach(function(d){
-    var t=new Date(d.date).getTime();
-    if(t>=d30) ios30+=(d.units||0);
-    else if(t>=d60) iosPrev+=(d.units||0);
-  });
+  var ios30=0;
+  daily.forEach(function(d){ ios30+=(d.units||0); });
   var and30=android.installs_30d||0;
-  var andPrev=android.installs_prev_30d||0;
   var total=ios30+(and30||0);
-  var totalPrev=iosPrev+(andPrev||0);
   document.getElementById('k-dl').innerHTML=fmtN(total||ios30);
   var te=document.getElementById('k-dl-t');
-  if(totalPrev>0){
-    var pct=((total-totalPrev)/totalPrev*100).toFixed(1);
-    te.innerHTML=(parseFloat(pct)>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev 30d';
-    te.className='kpi-trend '+(parseFloat(pct)>=0?'up':'dn');
+  // Use backend-calculated change which has full 65 days of data
+  var iosPct=data.sales&&data.sales.change_30d_pct!=null?data.sales.change_30d_pct:null;
+  if(iosPct!=null){
+    var pct=Math.round(iosPct);
+    te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs PP';
+    te.className='kpi-trend '+(pct>=0?'up':'dn');
   }
   var parts=[];
   if(ios30) parts.push('<span class="ios">iOS '+fmtN(ios30)+'</span>');
