@@ -1291,9 +1291,13 @@ var _cfChart=null, _lineChart=null, _barChart=null;
 
 // ── Card 1: Since Launch ──────────────────────────────────────────────────
 function renderSL(data,android){
-  var daily=(data.sales&&data.sales.daily)||[];
+  // Sum all monthly history + current partial month from daily
+  var monthly=(data.monthly)||[];
   var iosTotal=0;
-  daily.forEach(function(d){ iosTotal+=(d.downloads||0); });
+  monthly.forEach(function(m){ iosTotal+=(m.units||0); });
+  // Add current (partial) month from daily — monthly skips the current month
+  var daily=(data.sales&&data.sales.daily)||[];
+  daily.forEach(function(d){ iosTotal+=(d.units||0); });
   var andTotal=android.total_installs||null;
   var total=(iosTotal||0)+(andTotal||0);
   document.getElementById('k-sl').innerHTML=fmtN(total||null);
@@ -1310,8 +1314,8 @@ function renderDL(data,android){
   var ios30=0, iosPrev=0;
   daily.forEach(function(d){
     var t=new Date(d.date).getTime();
-    if(t>=d30) ios30+=(d.downloads||0);
-    else if(t>=d60) iosPrev+=(d.downloads||0);
+    if(t>=d30) ios30+=(d.units||0);
+    else if(t>=d60) iosPrev+=(d.units||0);
   });
   var and30=android.installs_30d||0;
   var andPrev=android.installs_prev_30d||0;
@@ -1336,7 +1340,7 @@ function renderYD(data,android){
   var yest=new Date(); yest.setDate(yest.getDate()-1);
   var yStr=yest.toISOString().slice(0,10);
   var iosYd=0;
-  daily.forEach(function(d){ if(d.date===yStr) iosYd+=(d.downloads||0); });
+  daily.forEach(function(d){ if(d.date===yStr) iosYd+=(d.units||0); });
   var andYd=android.installs_yesterday||null;
   var total=iosYd+(andYd||0);
   document.getElementById('k-yd').innerHTML=fmtN(total||null);
@@ -1460,7 +1464,7 @@ function renderLineChart(data,android){
   var labels=sorted.map(function(d){
     var dt=new Date(d.date); return (dt.getMonth()+1)+'/'+(dt.getDate());
   });
-  var iosD=sorted.map(function(d){return d.downloads||0;});
+  var iosD=sorted.map(function(d){return d.units||0;});
   var ctx=document.getElementById('lineC').getContext('2d');
   if(_lineChart){_lineChart.destroy();}
   _lineChart=new Chart(ctx,{
@@ -1489,19 +1493,13 @@ function renderLineChart(data,android){
 
 // ── Chart 2: Monthly Stacked Bar ──────────────────────────────────────────
 function renderBarChart(data,android){
-  var daily=(data.sales&&data.sales.daily)||[];
-  var mth={};
-  daily.forEach(function(d){
-    var ym=d.date.substring(0,7);
-    mth[ym]=(mth[ym]||0)+(d.downloads||0);
-  });
-  var months=Object.keys(mth).sort().slice(-12);
-  var lbls=months.map(function(ym){
-    var p=ym.split('-');
-    var names=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var monthly=(data.monthly||[]).slice(-12);
+  var names=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var lbls=monthly.map(function(m){
+    var p=m.month.split('-');
     return names[parseInt(p[1])-1]+" '"+p[0].slice(2);
   });
-  var iosV=months.map(function(m){return mth[m];});
+  var iosV=monthly.map(function(m){return m.units||0;});
   var ctx=document.getElementById('barC').getContext('2d');
   if(_barChart){_barChart.destroy();}
   _barChart=new Chart(ctx,{
