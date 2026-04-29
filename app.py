@@ -15,6 +15,8 @@ import requests
 from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 
+import historical as _hist
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -959,6 +961,23 @@ def _fetch_android_data():
     except Exception as e:
         log.warning("Android GCS installs error: %s", e)
 
+    # --- Historical CSV fallback: fill any None values from embedded CSV data ---
+    try:
+        fb = _hist.get_android_fallback()
+        if active_installs   is None: active_installs   = fb["active_installs"]
+        if total_installs    is None: total_installs    = fb["total_installs"]
+        if installs_yesterday is None: installs_yesterday = fb["installs_yesterday"]
+        if daily_installs    is None: daily_installs    = fb["daily_installs"]
+        if daily_uninstalls  is None: daily_uninstalls  = fb["daily_uninstalls"]
+        if installs_30d      is None: installs_30d      = fb["installs_30d"]
+        if installs_prev_30d is None: installs_prev_30d = fb["installs_prev_30d"]
+        if uninstalls_30d    is None: uninstalls_30d    = fb["uninstalls_30d"]
+        if distinct_users    is None: distinct_users    = fb["distinct_users"]
+        log.info("Android historical fallback applied: total=%s active=%s 30d=%s",
+                 total_installs, active_installs, installs_30d)
+    except Exception as e:
+        log.warning("Historical fallback error: %s", e)
+
     with _android_lock:
         _android_state["reviews"] = reviews[:12]
         _android_state["avg_rating"] = avg_rating
@@ -1008,10 +1027,20 @@ def refresh():
 
     try:
         monthly = _fetch_monthly_sales(months=14)
-        result["monthly"] = monthly
+        # Merge with historical CSV: fill in months where API returned 0 or nothing
+        hist_monthly = {m["month"]: m["units"] for m in _hist.get_ios_monthly_historical()}
+        api_monthly = {m["month"]: m["units"] for m in monthly}
+        merged = {}
+        for month in set(list(hist_monthly.keys()) + list(api_monthly.keys())):
+            api_val = api_monthly.get(month, 0)
+            hist_val = hist_monthly.get(month, 0)
+            # Prefer API value if non-zero, else use historical
+            merged[month] = api_val if api_val > 0 else hist_val
+        result["monthly"] = [{"month": m, "units": v} for m, v in sorted(merged.items()) if v > 0]
     except Exception as e:
         log.error("Monthly sales fetch error: %s", e)
-        result["monthly"] = []
+        result["monthly"] = [{"month": m["month"], "units": m["units"]}
+                             for m in _hist.get_ios_monthly_historical()]
         error = str(e)
 
     with _cache_lock:
@@ -1055,6 +1084,8 @@ def data_route():
         }
     with _android_lock:
         android_snap = dict(_android_state)
+    # Include Android historical monthly downloads for bar chart
+    android_snap["monthly_hist"] = _hist.get_android_monthly_historical()
     return jsonify({**cache_snap, "analytics": analytics_snap, "android": android_snap})
 
 
@@ -1286,13 +1317,16 @@ var _cfChart=null, _lineChart=null, _barChart=null;
 
 // ── Card 1: Since Launch ──────────────────────────────────────────────────
 function renderSL(data,android){
-  // Sum all monthly history + current partial month from daily
+  // Sum completed months + current partial month from daily only
   var monthly=(data.monthly)||[];
   var iosTotal=0;
   monthly.forEach(function(m){ iosTotal+=(m.units||0); });
-  // Add current (partial) month from daily — monthly skips the current month
+  // Add current partial month days from daily (avoid double-counting completed months)
+  var curMonth=new Date().toISOString().slice(0,7);
   var daily=(data.sales&&data.sales.daily)||[];
-  daily.forEach(function(d){ iosTotal+=(d.units||0); });
+  daily.forEach(function(d){
+    if(d.date&&d.date.slice(0,7)===curMonth){ iosTotal+=(d.units||0); }
+  });
   var andTotal=android.total_installs||null;
   var total=(iosTotal||0)+(andTotal||0);
   document.getElementById('k-sl').innerHTML=fmtN(total||null);
@@ -1466,18 +1500,30 @@ function renderLineChart(data,android){
 
 // ── Chart 2: Monthly Stacked Bar ──────────────────────────────────────────
 function renderBarChart(data,android){
-  var monthly=(data.monthly||[]).slice(-12);
+  var iosMonthly=(data.monthly||[]).slice(-12);
+  var andMonthly=(android.monthly_hist||[]);
+  var andMap={};
+  andMonthly.forEach(function(m){andMap[m.month]=m.units||0;});
+  var months=iosMonthly.map(function(m){return m.month;});
   var names=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var lbls=monthly.map(function(m){
-    var p=m.month.split('-');
+  var lbls=months.map(function(mo){
+    var p=mo.split('-');
     return names[parseInt(p[1])-1]+" '"+p[0].slice(2);
   });
-  var iosV=monthly.map(function(m){return m.units||0;});
+  var iosV=iosMonthly.map(function(m){return m.units||0;});
+  var andV=months.map(function(mo){return andMap[mo]||0;});
   var ctx=document.getElementById('barC').getContext('2d');
   if(_barChart){_barChart.destroy();}
   _barChart=new Chart(ctx,{
     type:'bar',
-    data:{labels:lbls,datasets:[{
+    data:{labels:lbls,datasets:[
+    {
+      label:'Android',data:andV,
+      backgroundColor:'rgba(34,197,94,.55)',
+      borderColor:'#22c55e',borderWidth:1,
+      borderRadius:0,stack:'s'
+    },
+    {
       label:'iOS',data:iosV,
       backgroundColor:'rgba(6,182,212,.65)',
       borderColor:IOS,borderWidth:1,
