@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import base64
 import jwt
 import requests
 from flask import Flask, jsonify, request
@@ -28,6 +29,10 @@ ASC_VENDOR_NUMBER = os.environ.get("ASC_VENDOR_NUMBER", "89476434")
 ASC_APP_ID = os.environ.get("ASC_APP_ID", "6740985837")
 REFRESH_HOURS = int(os.environ.get("REFRESH_HOURS", "6"))
 REFRESH_SECRET = os.environ.get("REFRESH_SECRET", "")
+
+ANDROID_PACKAGE = os.environ.get("ANDROID_PACKAGE", "com.coinmania.app")
+ANDROID_SA_JSON_BASE64 = os.environ.get("ANDROID_SA_JSON_BASE64", "")
+ANDROID_SA_JSON_PATH = os.environ.get("ANDROID_SA_JSON_PATH", "")
 
 def _load_private_key():
     raw = os.environ.get("ASC_PRIVATE_KEY", "").strip()
@@ -65,6 +70,16 @@ _analytics = {
     "fetched_at": None,
 }
 _analytics_lock = threading.Lock()
+
+_android_state = {
+    "reviews": [],
+    "avg_rating": None,
+    "rating_count": 0,
+    "dist": {},
+    "error": None,
+    "fetched_at": None,
+}
+_android_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -618,6 +633,97 @@ def _poll_analytics():
         log.info("Analytics polled but no data instances ready yet")
 
 # ---------------------------------------------------------------------------
+# Android / Google Play
+# ---------------------------------------------------------------------------
+
+def _get_android_sa_info():
+    if ANDROID_SA_JSON_BASE64:
+        try:
+            return json.loads(base64.b64decode(ANDROID_SA_JSON_BASE64).decode())
+        except Exception as e:
+            log.warning("Android SA base64 error: %s", e)
+    if ANDROID_SA_JSON_PATH:
+        try:
+            with open(ANDROID_SA_JSON_PATH) as f:
+                return json.load(f)
+        except Exception as e:
+            log.warning("Android SA path error: %s", e)
+    return None
+
+
+def _fetch_android_data():
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build as _gapi_build
+
+    sa_info = _get_android_sa_info()
+    if not sa_info:
+        log.info("Android SA not configured, skipping")
+        return
+
+    error = None
+    reviews = []
+    avg_rating = None
+    rating_count = 0
+    dist = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
+
+    try:
+        creds = service_account.Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/androidpublisher"],
+        )
+        svc = _gapi_build("androidpublisher", "v3", credentials=creds, cache_discovery=False)
+        result = svc.reviews().list(
+            packageName=ANDROID_PACKAGE, maxResults=50
+        ).execute()
+
+        ratings = []
+        for item in result.get("reviews", []):
+            for comment in item.get("comments", []):
+                uc = comment.get("userComment")
+                if not uc:
+                    continue
+                rating = uc.get("starRating", 0)
+                if rating:
+                    ratings.append(rating)
+                    r = int(rating)
+                    if 1 <= r <= 5:
+                        dist[r] += 1
+                last_mod = uc.get("lastModified", {})
+                secs = last_mod.get("seconds")
+                date_str = ""
+                if secs:
+                    try:
+                        dt = datetime.fromtimestamp(int(secs), tz=timezone.utc)
+                        date_str = dt.strftime("%Y-%m-%d")
+                    except Exception:
+                        pass
+                reviews.append({
+                    "rating": rating,
+                    "title": "",
+                    "body": uc.get("text", ""),
+                    "author": item.get("authorName", ""),
+                    "date": date_str,
+                    "territory": "Android",
+                    "platform": "android",
+                })
+
+        avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
+        rating_count = len(ratings)
+        log.info("Android reviews: %d, avg=%.2f", rating_count, avg_rating or 0)
+    except Exception as e:
+        log.warning("Android reviews error: %s", e)
+        error = str(e)
+
+    with _android_lock:
+        _android_state["reviews"] = reviews[:12]
+        _android_state["avg_rating"] = avg_rating
+        _android_state["rating_count"] = rating_count
+        _android_state["dist"] = dist
+        _android_state["error"] = error
+        _android_state["fetched_at"] = datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
 # Refresh
 # ---------------------------------------------------------------------------
 
@@ -655,6 +761,11 @@ def refresh():
         _cache["updatedAt"] = datetime.now(timezone.utc).isoformat()
         _cache["error"] = error
 
+    try:
+        _fetch_android_data()
+    except Exception as e:
+        log.warning("Android fetch error: %s", e)
+
     log.info("Refresh done in %.1fs", time.time() - t0)
 
     try:
@@ -684,7 +795,9 @@ def data_route():
             "data": _analytics["data"],
             "fetched_at": _analytics["fetched_at"],
         }
-    return jsonify({**cache_snap, "analytics": analytics_snap})
+    with _android_lock:
+        android_snap = dict(_android_state)
+    return jsonify({**cache_snap, "analytics": analytics_snap, "android": android_snap})
 
 
 @app.route("/refresh", methods=["POST"])
@@ -961,6 +1074,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .review-stars { font-size: 0.65rem; color: var(--gold); flex-shrink: 0; }
   .review-meta { font-size: 0.58rem; color: var(--muted); text-align: right; }
+  .platform-ios { font-size: 0.52rem; background: color-mix(in srgb,var(--cyan) 15%,transparent); color:var(--cyan); border-radius:4px; padding:1px 4px; margin-left:3px; }
+  .platform-android { font-size: 0.52rem; background: color-mix(in srgb,var(--green) 15%,transparent); color:var(--green); border-radius:4px; padding:1px 4px; margin-left:3px; }
   .review-title {
     font-size: 0.68rem; font-weight: 600;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -1092,6 +1207,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="reviews-grid" id="reviewsGrid"></div>
   </div>
+
 </div>
 
 <script>
@@ -1504,14 +1620,21 @@ function renderCountries(byCountry) {
   el.innerHTML = html;
 }
 
-function renderHealth(reviews, analytics) {
+function renderHealth(reviews, analytics, android) {
   var dist = (reviews && reviews.distribution) || {};
   var avg = reviews && reviews.average;
   var aStatus = (analytics && analytics.status) || 'pending';
   var summary = (analytics && analytics.data && analytics.data.summary) || {};
   var retention = (analytics && analytics.data && analytics.data.retention) || {};
+  var andAvg = android && android.avg_rating;
+  var andCount = (android && android.rating_count) || 0;
 
-  document.getElementById('donut-avg').textContent = avg != null ? avg.toFixed(1) : '—';
+  // Show combined or iOS avg in donut center, with Android beside it
+  var displayAvg = avg != null ? avg.toFixed(1) : '—';
+  document.getElementById('donut-avg').textContent = displayAvg;
+  if (andAvg != null && andCount > 0) {
+    document.getElementById('donut-avg').title = 'iOS: ' + displayAvg + '  Android: ' + andAvg.toFixed(1);
+  }
   if (Object.values(dist).some(function(v){ return v > 0; })) buildDonut(dist);
 
   var total = Object.values(dist).reduce(function(s,v){ return s+v; }, 0) || 1;
@@ -1528,15 +1651,21 @@ function renderHealth(reviews, analytics) {
   document.getElementById('distBars').innerHTML = dHtml;
 
   var hm = document.getElementById('healthMetrics');
+  var hmHtml = '';
+  // Always show Android rating if available
+  if (andAvg != null && andCount > 0) {
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Rating</span>' +
+      '<span class="health-metric-value" style="color:var(--green)">' + andAvg.toFixed(1) + '★ <span style="font-size:0.55rem;color:var(--muted)">(' + andCount + ')</span></span></div>';
+  }
   if (aStatus === 'ready') {
-    var html = '';
-    html += '<div class="health-metric-row">' +
+    hmHtml += '<div class="health-metric-row">' +
       '<span class="health-metric-label">Sessions 30d</span>' +
       '<span class="health-metric-value">' + fmt(summary.sessions_30d) + '</span></div>';
     var crashFree = (summary.sessions_30d && summary.crashes_30d != null)
       ? (100 - (summary.crashes_30d / summary.sessions_30d * 100)).toFixed(2) + '% CF'
       : '';
-    html += '<div class="health-metric-row">' +
+    hmHtml += '<div class="health-metric-row">' +
       '<span class="health-metric-label">Crashes 30d</span>' +
       '<span class="health-metric-value" style="color:var(--red)">' + fmt(summary.crashes_30d) +
       (crashFree ? '<span style="font-size:0.55rem;color:var(--muted);margin-left:4px">' + crashFree + '</span>' : '') +
@@ -1545,36 +1674,48 @@ function renderHealth(reviews, analytics) {
     if (retDates.length) {
       var latest = retention[retDates[0]];
       if (latest.d1 != null) {
-        html += '<div class="health-metric-row">' +
+        hmHtml += '<div class="health-metric-row">' +
           '<span class="health-metric-label">Retention D1</span>' +
           '<span class="health-metric-value" style="color:var(--cyan)">' +
           latest.d1.toFixed(1) + '%</span></div>';
       }
     }
-    hm.innerHTML = html;
+    hm.innerHTML = hmHtml || (shimmer() + shimmer() + shimmer());
   } else {
-    hm.innerHTML = shimmer() + shimmer() + shimmer();
+    hm.innerHTML = hmHtml + shimmer() + shimmer();
   }
 }
 
-function renderReviews(reviews) {
-  var recent = (reviews && reviews.recent) || [];
-  document.getElementById('reviewCount').textContent = fmt(reviews && reviews.count);
+function renderReviews(reviews, android) {
+  var iosRecent = (reviews && reviews.recent) || [];
+  var andRecent = (android && android.reviews) || [];
+  // Tag iOS reviews
+  var iosTagged = iosRecent.map(function(r){ return Object.assign({}, r, {platform: r.platform || 'ios'}); });
+  // Merge and sort by date desc, take top 6
+  var all = iosTagged.concat(andRecent);
+  all.sort(function(a, b){ return (b.date || '').localeCompare(a.date || ''); });
+  var totalCount = ((reviews && reviews.count) || 0) + ((android && android.rating_count) || 0);
+  document.getElementById('reviewCount').textContent = fmt(totalCount);
   var grid = document.getElementById('reviewsGrid');
-  if (!recent.length) {
+  if (!all.length) {
     grid.innerHTML = '<div style="color:var(--muted);font-size:.7rem;grid-column:1/-1">No reviews</div>';
     return;
   }
   var html = '';
-  recent.slice(0, 6).forEach(function(r) {
+  all.slice(0, 6).forEach(function(r) {
     var rNum = parseInt(r.rating) || 0;
     var starStr = '★'.repeat(rNum) + '☆'.repeat(5 - rNum);
+    var platBadge = r.platform === 'android'
+      ? '<span class="platform-android">Android</span>'
+      : '<span class="platform-ios">iOS</span>';
+    var territory = (r.platform === 'android') ? '' : (r.territory || '');
     html += '<div class="review-card">' +
       '<div class="review-top">' +
       '<span class="review-stars">' + starStr + '</span>' +
-      '<span class="review-meta">' + (r.territory || '') +
+      '<span class="review-meta">' + (territory || '') +
       (r.date ? '<br>' + r.date : '') + '</span></div>' +
-      '<div class="review-title">' + String(r.title || '').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' +
+      '<div class="review-title">' + String(r.title || '').replace(/</g,'&lt;').replace(/>/g,'&gt;') +
+      platBadge + '</div>' +
       '<div class="review-body">' + String(r.body || '').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' +
       '</div>';
   });
@@ -1585,6 +1726,7 @@ function render(cache) {
   if (!cache) return;
   var data = cache.data || {};
   var analytics = cache.analytics || { status: 'pending', data: { daily:{}, summary:{}, retention:{} } };
+  var android = cache.android || { reviews: [], avg_rating: null, rating_count: 0, dist: {} };
   var now = new Date();
   var mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   document.getElementById('datePill').textContent =
@@ -1596,8 +1738,8 @@ function render(cache) {
   renderKPIs(data, analytics);
   renderCharts(data, analytics);
   renderCountries((data.sales && data.sales.by_country) || []);
-  renderHealth(data.reviews, analytics);
-  renderReviews(data.reviews || {});
+  renderHealth(data.reviews, analytics, android);
+  renderReviews(data.reviews || {}, android);
 }
 
 // ── Poll ──────────────────────────────────────────────────────────────────────
