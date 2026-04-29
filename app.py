@@ -1160,20 +1160,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .vbar-fill{height:100%;border-radius:4px;transition:width .5s ease}
   .ver-cnt{font-size:.62rem;color:var(--muted);text-align:right}
 
-  /* ── Reviews Grid ─────────────────────────────────────────────── */
-  .rev-grid{flex:1;display:grid;grid-template-columns:1fr 1fr;
-    grid-template-rows:1fr 1fr;gap:8px;min-height:0}
+  /* ── Reviews Ticker ───────────────────────────────────────────── */
+  .rev-wrap{flex:1;overflow:hidden;position:relative;min-height:0}
+  .rev-track{display:flex;flex-direction:column;gap:6px}
+  .rev-track.animate{animation:revScroll var(--dur,20s) linear infinite}
+  @keyframes revScroll{0%{transform:translateY(0)}100%{transform:translateY(-50%)}}
   .rev-card{background:var(--card2);border:1px solid var(--border);border-radius:8px;
-    padding:9px 11px;display:flex;flex-direction:column;gap:3px;overflow:hidden}
+    padding:8px 10px;display:flex;flex-direction:column;gap:2px;overflow:hidden;flex-shrink:0}
   .rev-hdr{display:flex;align-items:center;gap:6px}
-  .rev-stars{color:var(--gold);font-size:.68rem;letter-spacing:1px;line-height:1}
-  .plat{font-size:.58rem;padding:1px 5px;border-radius:3px;font-weight:600}
+  .rev-stars{color:var(--gold);font-size:.65rem;letter-spacing:1px;line-height:1}
+  .plat{font-size:.56rem;padding:1px 5px;border-radius:3px;font-weight:600}
   .ios-p{background:rgba(6,182,212,.15);color:var(--ios)}
   .and-p{background:rgba(34,197,94,.15);color:var(--android)}
-  .rev-date{font-size:.58rem;color:var(--muted);margin-left:auto}
-  .rev-author{font-size:.63rem;font-weight:600;color:var(--text)}
-  .rev-body{font-size:.66rem;color:var(--muted);line-height:1.4;overflow:hidden;
-    display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
+  .rev-date{font-size:.56rem;color:var(--muted);margin-left:auto}
+  .rev-author{font-size:.62rem;font-weight:600;color:var(--text)}
+  .rev-body{font-size:.64rem;color:var(--muted);line-height:1.35;overflow:hidden;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 
   /* ── Shimmer ──────────────────────────────────────────────────── */
   @keyframes shim{0%{background-position:-400px 0}100%{background-position:400px 0}}
@@ -1258,7 +1260,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <div class="bot-card">
     <div class="card-ttl">Recent Reviews</div>
-    <div class="rev-grid" id="revGrid"></div>
+    <div class="rev-wrap"><div class="rev-track" id="revTrack"></div></div>
   </div>
 </div>
 
@@ -1537,21 +1539,23 @@ function renderVersions(android){
   }).join('');
 }
 
-// ── Reviews 2x2 ───────────────────────────────────────────────────────────
+// ── Reviews Ticker ────────────────────────────────────────────────────────
 function renderReviews(reviews,android){
   var ios=((reviews&&reviews.recent)||[]).map(function(r){return Object.assign({},r,{platform:'ios'});});
   var and=(android.reviews||[]).map(function(r){return Object.assign({},r,{platform:'android'});});
+  // Interleave Android / iOS
   var out=[],ii=0,ai=0;
-  while(out.length<4&&(ii<ios.length||ai<and.length)){
+  while(ii<ios.length||ai<and.length){
     if(ai<and.length) out.push(and[ai++]);
-    if(out.length<4&&ii<ios.length) out.push(ios[ii++]);
+    if(ii<ios.length) out.push(ios[ii++]);
   }
-  var el=document.getElementById('revGrid');
+  var el=document.getElementById('revTrack');
   if(!out.length){
-    el.innerHTML='<div class="rev-card">'+sh('.7rem')+sh('.65rem')+sh('3rem','100%')+'</div>'.repeat(4);
+    el.className='rev-track';
+    el.innerHTML='<div class="rev-card">'+sh('.7rem')+sh('.62rem')+sh('2.5rem','100%')+'</div>'.repeat(4);
     return;
   }
-  el.innerHTML=out.slice(0,4).map(function(r){
+  function cardHTML(r){
     var stars='';
     for(var i=1;i<=5;i++) stars+=i<=(r.rating||0)?'&#9733;':'&#9734;';
     var platCls=r.platform==='ios'?'ios-p':'and-p';
@@ -1565,9 +1569,16 @@ function renderReviews(reviews,android){
         '<span class="rev-date">'+(r.date||'')+'</span>'+
       '</div>'+
       '<div class="rev-author">'+author+'</div>'+
-      '<div class="rev-body">'+(body||'<em style="color:var(--muted)">No review text</em>')+'</div>'+
+      '<div class="rev-body">'+(body||'<em style="color:var(--muted)">No text</em>')+'</div>'+
       '</div>';
-  }).join('');
+  }
+  // Duplicate list for seamless loop
+  var html=out.map(cardHTML).join('');
+  el.innerHTML=html+html;
+  // Speed: ~4s per card
+  var dur=Math.max(10,out.length*4);
+  el.style.setProperty('--dur',dur+'s');
+  el.className='rev-track animate';
 }
 
 // ── Main Render ───────────────────────────────────────────────────────────
