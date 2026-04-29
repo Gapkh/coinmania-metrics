@@ -76,6 +76,10 @@ _android_state = {
     "avg_rating": None,
     "rating_count": 0,
     "dist": {},
+    "crash_rate": None,       # 7-day user-weighted crash rate (fraction, e.g. 0.002)
+    "anr_rate": None,         # 7-day user-weighted ANR rate
+    "crash_count_30d": None,  # total crash reports last 30d
+    "distinct_users": None,   # latest distinct users from vitals
     "error": None,
     "fetched_at": None,
 }
@@ -714,11 +718,101 @@ def _fetch_android_data():
         log.warning("Android reviews error: %s", e)
         error = str(e)
 
+    # --- Fetch Android vitals via Play Developer Reporting API ---
+    crash_rate = None
+    anr_rate = None
+    crash_count_30d = None
+    distinct_users = None
+    try:
+        import requests as _req
+        import google.auth.transport.requests as _gatr
+
+        vcreds = service_account.Credentials.from_service_account_info(
+            sa_info,
+            scopes=["https://www.googleapis.com/auth/playdeveloperreporting"],
+        )
+        vcreds.refresh(_gatr.Request(session=_req.Session()))
+        vtoken = vcreds.token
+
+        # freshness: data available up to ~3 days ago
+        today = datetime.now(timezone.utc).date()
+        end_date = today - timedelta(days=3)
+        start_date = today - timedelta(days=33)  # 30 days + 3 day lag
+
+        def _vitals_timeline(start, end):
+            return {
+                "aggregationPeriod": "DAILY",
+                "startTime": {"year": start.year, "month": start.month, "day": start.day},
+                "endTime":   {"year": end.year,   "month": end.month,   "day": end.day},
+            }
+
+        # Crash rate
+        cr = _req.post(
+            f"https://playdeveloperreporting.googleapis.com/v1beta1/apps/{ANDROID_PACKAGE}/crashRateMetricSet:query",
+            headers={"Authorization": f"Bearer {vtoken}", "Content-Type": "application/json"},
+            json={"timelineSpec": _vitals_timeline(start_date, end_date),
+                  "metrics": ["crashRate7dUserWeighted", "distinctUsers"], "dimensions": []},
+            timeout=30
+        )
+        if cr.status_code == 200:
+            rows = cr.json().get("rows", [])
+            if rows:
+                last = rows[-1]["metrics"]
+                for m in last:
+                    if m["metric"] == "crashRate7dUserWeighted":
+                        crash_rate = float(m["decimalValue"]["value"])
+                    if m["metric"] == "distinctUsers":
+                        distinct_users = int(float(m["decimalValue"]["value"]))
+            log.info("Android crash rate: %s, distinct users: %s", crash_rate, distinct_users)
+
+        # ANR rate
+        ar = _req.post(
+            f"https://playdeveloperreporting.googleapis.com/v1beta1/apps/{ANDROID_PACKAGE}/anrRateMetricSet:query",
+            headers={"Authorization": f"Bearer {vtoken}", "Content-Type": "application/json"},
+            json={"timelineSpec": _vitals_timeline(start_date, end_date),
+                  "metrics": ["anrRate7dUserWeighted"], "dimensions": []},
+            timeout=30
+        )
+        if ar.status_code == 200:
+            rows = ar.json().get("rows", [])
+            if rows:
+                last = rows[-1]["metrics"]
+                for m in last:
+                    if m["metric"] == "anrRate7dUserWeighted":
+                        anr_rate = float(m["decimalValue"]["value"])
+            log.info("Android ANR rate: %s", anr_rate)
+
+        # Total crash count last 30 days
+        ec = _req.post(
+            f"https://playdeveloperreporting.googleapis.com/v1beta1/apps/{ANDROID_PACKAGE}/errorCountMetricSet:query",
+            headers={"Authorization": f"Bearer {vtoken}", "Content-Type": "application/json"},
+            json={"timelineSpec": _vitals_timeline(start_date, end_date),
+                  "metrics": ["errorReportCount"], "dimensions": ["reportType"]},
+            timeout=30
+        )
+        if ec.status_code == 200:
+            total = 0
+            for row in ec.json().get("rows", []):
+                dims = {d["dimension"]: d.get("stringValue", "") for d in row.get("dimensions", [])}
+                if dims.get("reportType") == "CRASH":
+                    for m in row.get("metrics", []):
+                        if m["metric"] == "errorReportCount":
+                            total += int(float(m["decimalValue"]["value"]))
+            crash_count_30d = total
+            log.info("Android crash count 30d: %s", crash_count_30d)
+
+    except Exception as e:
+        log.warning("Android vitals error: %s", e)
+
     with _android_lock:
         _android_state["reviews"] = reviews[:12]
         _android_state["avg_rating"] = avg_rating
         _android_state["rating_count"] = rating_count
         _android_state["dist"] = dist
+        _android_state["crash_rate"] = crash_rate
+        _android_state["anr_rate"] = anr_rate
+        _android_state["crash_count_30d"] = crash_count_30d
+        _android_state["distinct_users"] = distinct_users
         _android_state["error"] = error
         _android_state["fetched_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -1652,11 +1746,38 @@ function renderHealth(reviews, analytics, android) {
 
   var hm = document.getElementById('healthMetrics');
   var hmHtml = '';
-  // Always show Android rating if available
+  // Android vitals
   if (andAvg != null && andCount > 0) {
     hmHtml += '<div class="health-metric-row">' +
       '<span class="health-metric-label"><span class="platform-android">Android</span> Rating</span>' +
-      '<span class="health-metric-value" style="color:var(--green)">' + andAvg.toFixed(1) + '★ <span style="font-size:0.55rem;color:var(--muted)">(' + andCount + ')</span></span></div>';
+      '<span class="health-metric-value" style="color:var(--green)">' + andAvg.toFixed(1) + '&#9733; <span style="font-size:0.55rem;color:var(--muted)">(' + andCount + ')</span></span></div>';
+  }
+  var andCrashRate = android && android.crash_rate;
+  var andAnrRate = android && android.anr_rate;
+  var andCrashes30d = android && android.crash_count_30d;
+  var andUsers = android && android.distinct_users;
+  if (andCrashRate != null) {
+    var crashPct = (andCrashRate * 100).toFixed(2);
+    var crashColor = andCrashRate < 0.01 ? 'var(--green)' : andCrashRate < 0.05 ? 'var(--gold)' : 'var(--red)';
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Crash rate</span>' +
+      '<span class="health-metric-value" style="color:' + crashColor + '">' + crashPct + '%</span></div>';
+  }
+  if (andAnrRate != null) {
+    var anrPct = (andAnrRate * 100).toFixed(2);
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> ANR rate</span>' +
+      '<span class="health-metric-value" style="color:var(--muted)">' + anrPct + '%</span></div>';
+  }
+  if (andCrashes30d != null) {
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Crashes 30d</span>' +
+      '<span class="health-metric-value" style="color:var(--red)">' + fmt(andCrashes30d) + '</span></div>';
+  }
+  if (andUsers != null) {
+    hmHtml += '<div class="health-metric-row">' +
+      '<span class="health-metric-label"><span class="platform-android">Android</span> Active users</span>' +
+      '<span class="health-metric-value" style="color:var(--green)">' + fmt(andUsers) + '</span></div>';
   }
   if (aStatus === 'ready') {
     hmHtml += '<div class="health-metric-row">' +
