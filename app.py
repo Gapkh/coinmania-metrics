@@ -270,9 +270,9 @@ def _fetch_monthly_sales(months=14):
         }
         url = f"{BASE_URL}/v1/salesReports"
         try:
-            resp = _get(url, params=params, timeout=30)
+            resp = _get(url, params=params, timeout=30, accept="application/a-gzip")
             content = resp.content
-            if resp.headers.get("Content-Encoding") == "gzip" or content[:2] == b"\x1f\x8b":
+            if content[:2] == b"\x1f\x8b":
                 content = gzip.decompress(content)
             text = content.decode("utf-8")
             lines = text.strip().splitlines()
