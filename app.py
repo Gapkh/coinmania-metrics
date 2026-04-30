@@ -1181,10 +1181,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     --gold:#f59e0b;--red:#ef4444;--purple:#a78bfa;
   }
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-  html,body{height:100vh;overflow:hidden;background:var(--bg);color:var(--text);
+  html,body{height:97vh;overflow:hidden;background:var(--bg);color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif}
-  /* Rows: 36 hdr + 152 kpi + 1fr charts + 228 bottom + 3×8 gaps + 20 padding = 1080 */
-  body{display:grid;grid-template-rows:36px 152px 1fr 228px;gap:8px;padding:10px 16px;height:100vh}
+  /* Rows: 32 hdr + 137 kpi + 1fr charts + 205 bottom + 3×7 gaps + 16 padding ≈ 97vh */
+  body{display:grid;grid-template-rows:32px 137px 1fr 205px;gap:7px;padding:8px 14px;height:97vh}
 
   /* ── Header ─────────────────────────────────────────────────── */
   .hdr{display:flex;align-items:center;gap:10px}
@@ -1203,7 +1203,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   /* ── KPI Row ────────────────────────────────────────────────── */
   .kpi-row{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
   .kpi{background:var(--card);border:1px solid var(--border);border-radius:10px;
-    padding:10px 13px 10px;display:flex;flex-direction:column;
+    padding:8px 12px 8px;display:flex;flex-direction:column;
     position:relative;overflow:hidden}
   .kpi::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
     background:var(--accent,var(--ios));border-radius:10px 10px 0 0;
@@ -1240,9 +1240,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .sbar-fill{height:100%;background:var(--gold);border-radius:2px}
 
   /* ── Charts Row ─────────────────────────────────────────────── */
-  .charts-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .charts-row{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .chart-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
-    padding:10px 14px 8px;display:flex;flex-direction:column;min-height:0}
+    padding:8px 12px 6px;display:flex;flex-direction:column;min-height:0}
   .chart-title{font-size:.6rem;font-weight:700;color:var(--muted);
     text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;
     display:flex;align-items:center;gap:10px}
@@ -1252,9 +1252,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .cw{flex:1;min-height:0;position:relative}
 
   /* ── Bottom Row ─────────────────────────────────────────────── */
-  .bot-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .bot-row{display:grid;grid-template-columns:1fr 1fr;gap:7px}
   .bot-card{background:var(--card);border:1px solid var(--border);border-radius:10px;
-    padding:10px 14px 10px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+    padding:8px 12px 8px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
   .card-ttl{font-size:.6rem;font-weight:700;color:var(--muted);
     text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px;flex-shrink:0}
 
@@ -1334,7 +1334,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
   <!-- 3. Yesterday -->
   <div class="kpi" style="--accent:var(--ios)">
-    <div class="kpi-lbl">Downloads &middot; Yesterday</div>
+    <div class="kpi-lbl">Downloads &middot; Latest Day</div>
     <div class="kpi-val" id="k-yd" style="font-size:1.45rem;margin:3px 0 5px">&#8212;</div>
     <div class="kpi-plat" style="gap:7px">
       <div class="yd-row">
@@ -1500,9 +1500,10 @@ function renderYD(data,android){
   var daily=(data.sales&&data.sales.daily)||[];
   var sortedD=daily.slice().sort(function(a,b){return a.date<b.date?-1:1;});
 
-  // iOS: latest and second-latest dates in the daily array
-  var iosLatest=sortedD.length?sortedD[sortedD.length-1]:null;
-  var iosPrev=sortedD.length>1?sortedD[sortedD.length-2]:null;
+  // iOS: skip zero-unit entries (API lag returns 0 for dates not yet available)
+  var validD=sortedD.filter(function(d){return (d.units||0)>0;});
+  var iosLatest=validD.length?validD[validD.length-1]:null;
+  var iosPrev=validD.length>1?validD[validD.length-2]:null;
   var iosVal=iosLatest?(iosLatest.units||0):0;
   var iosPrevVal=iosPrev?(iosPrev.units||0):0;
   var iosDateStr=iosLatest?iosLatest.date:null;
@@ -1799,7 +1800,7 @@ function renderBarChart(data,android){
                 var prev=(iosV[i-1]||0)+(andV[i-1]||0);
                 if(!prev)return null;
                 var p=Math.round((tot-prev)/prev*100);
-                return(p>=0?'&#9650; +':'&#9660; ')+p+'%';
+                return(p>=0?'▲ +':'▼ ')+p+'%';
               }
             }
           }
