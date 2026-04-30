@@ -1233,9 +1233,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .sep{color:#2e2e46}
   .kpi-spark{flex:1;min-height:0;margin-top:4px;position:relative}
   /* Special KPI: Rating stars */
-  .kpi-stars{flex:1;display:flex;flex-direction:column;justify-content:flex-end;
-    gap:3px;min-height:0}
-  .star-row{display:grid;grid-template-columns:22px 1fr 20px;align-items:center;gap:4px;font-size:.55rem;color:var(--muted)}
+  .kpi-stars{flex:1;display:flex;flex-direction:column;justify-content:space-evenly;
+    gap:1px;min-height:0;overflow:hidden}
+  .star-row{display:grid;grid-template-columns:20px 1fr 18px;align-items:center;gap:3px;font-size:.52rem;color:var(--muted)}
   .sbar-bg{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
   .sbar-fill{height:100%;background:var(--gold);border-radius:2px}
 
@@ -1373,8 +1373,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- 6. Rating -->
   <div class="kpi" style="--accent:var(--gold)">
     <div class="kpi-lbl">Average Rating</div>
-    <div class="kpi-val" id="k-rt">&#8212;</div>
-    <div class="kpi-split" id="k-rt-s"></div>
+    <div class="kpi-val" id="k-rt" style="font-size:1.7rem;margin:2px 0 1px">&#8212;</div>
+    <div class="kpi-split" id="k-rt-s" style="margin-bottom:3px"></div>
     <div class="kpi-stars" id="k-stars"></div>
   </div>
 </div>
