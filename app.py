@@ -965,15 +965,16 @@ def _fetch_android_data():
     # --- Historical CSV fallback: fill any None values from embedded CSV data ---
     try:
         fb = _hist.get_android_fallback()
-        if active_installs   is None: active_installs   = fb["active_installs"]
-        if total_installs    is None: total_installs    = fb["total_installs"]
+        # Use `not X` so 0 (from GCS column mismatch) also triggers fallback
+        if not active_installs:   active_installs   = fb["active_installs"]
+        if not total_installs:    total_installs    = fb["total_installs"]
         if installs_yesterday is None: installs_yesterday = fb["installs_yesterday"]
         if daily_installs    is None: daily_installs    = fb["daily_installs"]
         if daily_uninstalls  is None: daily_uninstalls  = fb["daily_uninstalls"]
         if installs_30d      is None: installs_30d      = fb["installs_30d"]
         if installs_prev_30d is None: installs_prev_30d = fb["installs_prev_30d"]
         if uninstalls_30d    is None: uninstalls_30d    = fb["uninstalls_30d"]
-        if distinct_users    is None: distinct_users    = fb["distinct_users"]
+        if not distinct_users:    distinct_users    = fb["distinct_users"]
         log.info("Android historical fallback applied: total=%s active=%s 30d=%s",
                  total_installs, active_installs, installs_30d)
     except Exception as e:
@@ -1454,11 +1455,20 @@ function renderYD(data,android){
   document.getElementById('k-yd').innerHTML=fmtN(total||null);
   var te=document.getElementById('k-yd-t');
   if(te){
-    var prevTotal=iosDayBefore+(andDb||0);
-    if(prevTotal>0&&total>0){
-      var pct=Math.round((total-prevTotal)/prevTotal*100);
-      te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev day';
+    // If iOS has no data for yesterday but does for earlier days = API lag
+    // Avoid misleading combined% by comparing Android-only when iOS is lagging
+    var iosLag=iosYd===0&&daily.some(function(d){return d.units>0;});
+    if(iosLag&&andYd&&andDb){
+      var pct=Math.round((andYd-andDb)/andDb*100);
+      te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% Android vs prev day';
       te.className='kpi-trend '+(pct>=0?'up':'dn');
+    } else {
+      var prevTotal=iosDayBefore+(andDb||0);
+      if(prevTotal>0&&total>0){
+        var pct=Math.round((total-prevTotal)/prevTotal*100);
+        te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev day';
+        te.className='kpi-trend '+(pct>=0?'up':'dn');
+      }
     }
   }
   setPlat('k-yd-ios','k-yd-and','k-yd-bar',iosYd||null,andYd);

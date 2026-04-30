@@ -542,4 +542,15 @@ def get_mau_series(sample_days=7):
             "ios": IOS_MAU.get(last),
             "and": AND_MAU.get(last),
         })
+    # Forward-fill None values so each platform's last known value carries forward
+    last_ios, last_and = None, None
+    for pt in result:
+        if pt["ios"] is not None:
+            last_ios = pt["ios"]
+        else:
+            pt["ios"] = last_ios
+        if pt["and"] is not None:
+            last_and = pt["and"]
+        else:
+            pt["and"] = last_and
     return result
