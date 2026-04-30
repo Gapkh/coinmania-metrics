@@ -86,8 +86,9 @@ _android_state = {
     # GCS installs data
     "active_installs": None,    # latest Active Device Installs
     "total_installs": None,     # Total User Installs (all-time, from latest row)
-    "installs_yesterday": None, # Daily User Installs for yesterday
-    "daily_installs": None,     # avg Daily User Installs (last 30 days)
+    "installs_yesterday": None,      # Daily User Installs for yesterday
+    "installs_yesterday_date": None, # date string that installs_yesterday refers to
+    "daily_installs": None,          # avg Daily User Installs (last 30 days)
     "daily_uninstalls": None,   # avg Daily User Uninstalls (last 30 days)
     "installs_30d": None,       # total Daily User Installs summed over last 30 days
     "installs_prev_30d": None,  # total Daily User Installs summed over days 31-60
@@ -339,25 +340,31 @@ def _fetch_monthly_sales(months=14):
 # ---------------------------------------------------------------------------
 
 def _fetch_reviews():
-    url = f"{BASE_URL}/v1/apps/{ASC_APP_ID}/customerReviews"
-    params = {
+    """Paginate through ALL iOS reviews (up to 500)."""
+    next_url = f"{BASE_URL}/v1/apps/{ASC_APP_ID}/customerReviews"
+    next_params = {
         "sort": "-createdDate",
-        "limit": 50,
+        "limit": 200,
         "fields[customerReviews]": "rating,title,body,reviewerNickname,createdDate,territory",
     }
+    all_raw = []
     try:
-        resp = _get(url, params=params, timeout=30)
-        data = resp.json()
-        reviews_raw = data.get("data", [])
+        while next_url and len(all_raw) < 500:
+            resp = _get(next_url, params=next_params, timeout=30)
+            data = resp.json()
+            all_raw.extend(data.get("data", []))
+            next_url = data.get("links", {}).get("next")
+            next_params = None  # next_url already contains query params
     except Exception as e:
         log.warning("Error fetching reviews: %s", e)
-        return {"average": None, "count": 0, "distribution": {}, "recent": []}
+        if not all_raw:
+            return {"average": None, "count": 0, "distribution": {}, "recent": []}
 
     ratings = []
     dist = {1: 0, 2: 0, 3: 0, 4: 0, 5: 0}
     recent = []
 
-    for item in reviews_raw:
+    for item in all_raw:
         attrs = item.get("attributes", {})
         rating = attrs.get("rating")
         if rating is not None:
@@ -378,11 +385,12 @@ def _fetch_reviews():
         })
 
     avg = round(sum(ratings) / len(ratings), 2) if ratings else None
+    log.info("iOS reviews fetched: %d total", len(recent))
     return {
         "average": avg,
         "count": len(ratings),
         "distribution": dist,
-        "recent": recent[:12],
+        "recent": recent,  # all reviews, no artificial limit
     }
 
 # ---------------------------------------------------------------------------
@@ -690,12 +698,22 @@ def _fetch_android_data():
             scopes=["https://www.googleapis.com/auth/androidpublisher"],
         )
         svc = _gapi_build("androidpublisher", "v3", credentials=creds, cache_discovery=False)
-        result = svc.reviews().list(
-            packageName=ANDROID_PACKAGE, maxResults=50
-        ).execute()
+        # Paginate through ALL Android reviews
+        all_android_raw = []
+        page_token = None
+        while len(all_android_raw) < 500:
+            kwargs = {"packageName": ANDROID_PACKAGE, "maxResults": 100}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            result = svc.reviews().list(**kwargs).execute()
+            all_android_raw.extend(result.get("reviews", []))
+            page_token = result.get("tokenPagination", {}).get("nextPageToken")
+            if not page_token:
+                break
+        log.info("Android reviews fetched: %d total", len(all_android_raw))
 
         ratings = []
-        for item in result.get("reviews", []):
+        for item in all_android_raw:
             for comment in item.get("comments", []):
                 uc = comment.get("userComment")
                 if not uc:
@@ -822,6 +840,7 @@ def _fetch_android_data():
     active_installs = None
     total_installs = None
     installs_yesterday = None
+    installs_yesterday_date = None
     daily_installs = None
     version_data = []
     daily_uninstalls = None
@@ -910,8 +929,20 @@ def _fetch_android_data():
             if yest_rows:
                 try:
                     installs_yesterday = int(float(yest_rows[0].get("Daily User Installs", 0) or 0))
+                    installs_yesterday_date = yesterday_str
                 except (ValueError, TypeError):
                     pass
+            else:
+                # GCS may lag 1-2 days; use the most recent available row
+                sorted_gcs = sorted(all_rows, key=lambda r: r.get("Date", ""), reverse=True)
+                for r in sorted_gcs:
+                    try:
+                        v = int(float(r.get("Daily User Installs", 0) or 0))
+                        installs_yesterday = v
+                        installs_yesterday_date = r.get("Date", "")
+                        break
+                    except (ValueError, TypeError):
+                        continue
 
             # Last 30 days and previous 30 days
             inst_vals, uninst_vals, prev_vals = [], [], []
@@ -968,7 +999,11 @@ def _fetch_android_data():
         # Use `not X` so 0 (from GCS column mismatch) also triggers fallback
         if not active_installs:   active_installs   = fb["active_installs"]
         if not total_installs:    total_installs    = fb["total_installs"]
-        if installs_yesterday is None: installs_yesterday = fb["installs_yesterday"]
+        if installs_yesterday is None:
+            installs_yesterday      = fb["installs_yesterday"]
+            installs_yesterday_date = fb.get("installs_yesterday_date")
+        if installs_yesterday_date is None:
+            installs_yesterday_date = fb.get("installs_yesterday_date")
         if daily_installs    is None: daily_installs    = fb["daily_installs"]
         if daily_uninstalls  is None: daily_uninstalls  = fb["daily_uninstalls"]
         if installs_30d      is None: installs_30d      = fb["installs_30d"]
@@ -981,7 +1016,7 @@ def _fetch_android_data():
         log.warning("Historical fallback error: %s", e)
 
     with _android_lock:
-        _android_state["reviews"] = reviews[:12]
+        _android_state["reviews"] = reviews  # all paginated reviews
         _android_state["avg_rating"] = avg_rating
         _android_state["rating_count"] = rating_count
         _android_state["dist"] = dist
@@ -992,6 +1027,7 @@ def _fetch_android_data():
         _android_state["active_installs"] = active_installs
         _android_state["total_installs"] = total_installs
         _android_state["installs_yesterday"] = installs_yesterday
+        _android_state["installs_yesterday_date"] = installs_yesterday_date
         _android_state["daily_installs"] = daily_installs
         _android_state["daily_uninstalls"] = daily_uninstalls
         _android_state["installs_30d"] = installs_30d
@@ -1253,6 +1289,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .shim{background:linear-gradient(90deg,var(--card) 25%,#16162a 50%,var(--card) 75%);
     background-size:800px 100%;animation:shim 1.5s infinite;border-radius:4px;display:block}
   .up{color:var(--android)} .dn{color:var(--red)} .mu{color:var(--muted)}
+
+  /* ── Yesterday card per-platform rows ──────────────────────────── */
+  .yd-row{display:grid;grid-template-columns:46px auto 1fr auto;align-items:center;
+    gap:4px;flex-shrink:0}
+  .yd-num{font-size:.85rem;font-weight:800;color:var(--text);letter-spacing:-.5px}
+  .yd-dt{font-size:.52rem;color:var(--muted);white-space:nowrap}
+  .yd-pct{font-size:.6rem;font-weight:700;white-space:nowrap;text-align:right}
 </style>
 </head>
 <body>
@@ -1292,11 +1335,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <!-- 3. Yesterday -->
   <div class="kpi" style="--accent:var(--ios)">
     <div class="kpi-lbl">Downloads &middot; Yesterday</div>
-    <div class="kpi-val" id="k-yd">&#8212;</div>
-    <div class="kpi-trend" id="k-yd-t"></div>
-    <div class="kpi-plat">
-      <div class="kpi-prow"><span class="plt ios">iOS</span><span class="pnum" id="k-yd-ios">&#8212;</span></div>
-      <div class="kpi-prow"><span class="plt and">Android</span><span class="pnum" id="k-yd-and">&#8212;</span></div>
+    <div class="kpi-val" id="k-yd" style="font-size:1.45rem;margin:3px 0 5px">&#8212;</div>
+    <div class="kpi-plat" style="gap:7px">
+      <div class="yd-row">
+        <span class="plt ios">iOS</span>
+        <span class="yd-num" id="k-yd-ios">&#8212;</span>
+        <span class="yd-dt" id="k-yd-ios-d"></span>
+        <span class="yd-pct" id="k-yd-ios-t"></span>
+      </div>
+      <div class="yd-row">
+        <span class="plt and">Android</span>
+        <span class="yd-num" id="k-yd-and">&#8212;</span>
+        <span class="yd-dt" id="k-yd-and-d"></span>
+        <span class="yd-pct" id="k-yd-and-t"></span>
+      </div>
     </div>
     <div class="kpi-ratio"><div class="kpi-ratio-ios" id="k-yd-bar" style="width:50%"></div></div>
   </div>
@@ -1372,6 +1424,12 @@ Chart.defaults.borderColor = '#1a1a2e';
 Chart.defaults.font.family = "-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif";
 Chart.defaults.font.size = 10;
 
+function fmtDateShort(s){
+  if(!s)return'';
+  var mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var p=s.split('-');
+  return mo[parseInt(p[1])-1]+' '+parseInt(p[2]);
+}
 function fmt(n){
   if(n==null)return'&#8212;';
   if(n>=1e6)return(n/1e6).toFixed(1)+'M';
@@ -1440,38 +1498,53 @@ function renderDL(data,android){
 // ── Card 3: Yesterday ────────────────────────────────────────────────────
 function renderYD(data,android){
   var daily=(data.sales&&data.sales.daily)||[];
-  var yest=new Date(); yest.setDate(yest.getDate()-1);
-  var dayBefore=new Date(); dayBefore.setDate(dayBefore.getDate()-2);
-  var yStr=yest.toISOString().slice(0,10);
-  var dbStr=dayBefore.toISOString().slice(0,10);
-  var iosYd=0, iosDayBefore=0;
-  daily.forEach(function(d){
-    if(d.date===yStr) iosYd+=(d.units||0);
-    if(d.date===dbStr) iosDayBefore+=(d.units||0);
-  });
-  var andYd=android.installs_yesterday||null;
-  var andDb=android.and_day_before||null;
-  var total=iosYd+(andYd||0);
-  document.getElementById('k-yd').innerHTML=fmtN(total||null);
-  var te=document.getElementById('k-yd-t');
-  if(te){
-    // If iOS has no data for yesterday but does for earlier days = API lag
-    // Avoid misleading combined% by comparing Android-only when iOS is lagging
-    var iosLag=iosYd===0&&daily.some(function(d){return d.units>0;});
-    if(iosLag&&andYd&&andDb){
-      var pct=Math.round((andYd-andDb)/andDb*100);
-      te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% Android vs prev day';
-      te.className='kpi-trend '+(pct>=0?'up':'dn');
-    } else {
-      var prevTotal=iosDayBefore+(andDb||0);
-      if(prevTotal>0&&total>0){
-        var pct=Math.round((total-prevTotal)/prevTotal*100);
-        te.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'% vs prev day';
-        te.className='kpi-trend '+(pct>=0?'up':'dn');
-      }
-    }
+  var sortedD=daily.slice().sort(function(a,b){return a.date<b.date?-1:1;});
+
+  // iOS: latest and second-latest dates in the daily array
+  var iosLatest=sortedD.length?sortedD[sortedD.length-1]:null;
+  var iosPrev=sortedD.length>1?sortedD[sortedD.length-2]:null;
+  var iosVal=iosLatest?(iosLatest.units||0):0;
+  var iosPrevVal=iosPrev?(iosPrev.units||0):0;
+  var iosDateStr=iosLatest?iosLatest.date:null;
+
+  // Android: from backend (GCS or historical fallback)
+  var andVal=android.installs_yesterday||0;
+  var andDb=android.and_day_before||0;
+  var andDateStr=android.installs_yesterday_date||null;
+
+  // Combined total for header
+  var total=(iosVal||0)+(andVal||0);
+  document.getElementById('k-yd').innerHTML=total>0?fmtN(total):sh('1.5rem');
+
+  // iOS row
+  var iosNumEl=document.getElementById('k-yd-ios');
+  var iosDtEl=document.getElementById('k-yd-ios-d');
+  var iosTEl=document.getElementById('k-yd-ios-t');
+  if(iosNumEl) iosNumEl.textContent=iosVal>0?Math.round(iosVal).toLocaleString():'—';
+  if(iosDtEl)  iosDtEl.textContent=fmtDateShort(iosDateStr);
+  if(iosTEl&&iosPrevVal>0){
+    var pct=Math.round((iosVal-iosPrevVal)/iosPrevVal*100);
+    iosTEl.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'%';
+    iosTEl.className='yd-pct '+(pct>=0?'up':'dn');
   }
-  setPlat('k-yd-ios','k-yd-and','k-yd-bar',iosYd||null,andYd);
+
+  // Android row
+  var andNumEl=document.getElementById('k-yd-and');
+  var andDtEl=document.getElementById('k-yd-and-d');
+  var andTEl=document.getElementById('k-yd-and-t');
+  if(andNumEl) andNumEl.textContent=andVal>0?Math.round(andVal).toLocaleString():'—';
+  if(andDtEl)  andDtEl.textContent=fmtDateShort(andDateStr);
+  if(andTEl&&andDb>0&&andVal>0){
+    var pct=Math.round((andVal-andDb)/andDb*100);
+    andTEl.innerHTML=(pct>=0?'&#9650; +':'&#9660; ')+pct+'%';
+    andTEl.className='yd-pct '+(pct>=0?'up':'dn');
+  }
+
+  // Ratio bar
+  var be=document.getElementById('k-yd-bar');
+  if(be&&iosVal&&andVal){
+    be.style.width=(iosVal/(iosVal+andVal)*100).toFixed(1)+'%';
+  }
 }
 
 // ── Card 4: DAU ──────────────────────────────────────────────────────────
@@ -1695,20 +1768,47 @@ function renderBarChart(data,android){
         backgroundColor:'rgba(0,0,0,0)',borderWidth:0,
         stack:'s',
         datalabels:{
-          display:true,
-          anchor:'end',align:'top',offset:2,
-          color:'#c0c0d8',font:{size:9,weight:'bold'},
-          formatter:function(v,ctx){
-            var i=ctx.dataIndex;
-            var tot=(iosV[i]||0)+(andV[i]||0);
-            return tot>0?tot.toLocaleString():null;
+          labels:{
+            num:{
+              display:true,
+              anchor:'end',align:'top',offset:5,
+              color:'#c0c0d8',font:{size:9,weight:'bold'},
+              formatter:function(v,ctx){
+                var i=ctx.dataIndex;
+                var tot=(iosV[i]||0)+(andV[i]||0);
+                return tot>0?tot.toLocaleString():null;
+              }
+            },
+            pct:{
+              display:function(ctx){
+                var i=ctx.dataIndex;
+                return i>0&&((iosV[i-1]||0)+(andV[i-1]||0))>0;
+              },
+              anchor:'end',align:'top',offset:18,
+              color:function(ctx){
+                var i=ctx.dataIndex;
+                var tot=(iosV[i]||0)+(andV[i]||0);
+                var prev=(iosV[i-1]||0)+(andV[i-1]||0);
+                return tot>=prev?'#4ade80':'#f87171';
+              },
+              font:{size:8,weight:'700'},
+              formatter:function(v,ctx){
+                var i=ctx.dataIndex;
+                if(i===0)return null;
+                var tot=(iosV[i]||0)+(andV[i]||0);
+                var prev=(iosV[i-1]||0)+(andV[i-1]||0);
+                if(!prev)return null;
+                var p=Math.round((tot-prev)/prev*100);
+                return(p>=0?'&#9650; +':'&#9660; ')+p+'%';
+              }
+            }
           }
         }
       }
     ]},
     options:{
       responsive:true,maintainAspectRatio:false,
-      layout:{padding:{top:24}},
+      layout:{padding:{top:42}},
       plugins:{
         legend:{display:false},
         tooltip:{

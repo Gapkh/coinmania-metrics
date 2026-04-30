@@ -466,10 +466,18 @@ def get_android_fallback(today=None):
     # mau: latest available
     mau = _latest(AND_MAU)
 
+    # date that installs_yesterday refers to
+    if AND_DOWNLOADS.get(yesterday_str) is not None:
+        installs_yesterday_date = yesterday_str
+    else:
+        available = sorted(k for k in AND_DOWNLOADS if k < today_str)
+        installs_yesterday_date = available[-1] if available else None
+
     return {
         "active_installs": active_installs,
         "total_installs": total_installs,
         "installs_yesterday": installs_yesterday,
+        "installs_yesterday_date": installs_yesterday_date,
         "daily_installs": daily_installs,
         "daily_uninstalls": daily_uninstalls,
         "installs_30d": installs_30d,
